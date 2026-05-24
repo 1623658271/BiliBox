@@ -369,8 +369,11 @@ pub async fn resume_download_tasks(
 pub async fn delete_download_tasks(
     download_manager: State<'_, Arc<DownloadManager>>,
     task_ids: Vec<String>,
+    delete_files: Option<bool>,
 ) -> Result<(), String> {
-    download_manager.delete_download_tasks(task_ids).await
+    download_manager
+        .delete_download_tasks(task_ids, delete_files.unwrap_or(false))
+        .await
 }
 
 /// 重启下载任务
@@ -584,4 +587,47 @@ pub fn open_download_folder(
         .map_err(|e| format!("打开目录失败: {}", e))?;
 
     Ok(())
+}
+
+/// 打开单个下载任务所在目录
+#[tauri::command]
+pub fn open_download_task_folder(
+    download_manager: State<'_, Arc<DownloadManager>>,
+    task_id: String,
+) -> Result<(), String> {
+    let path = download_manager.get_task_folder(&task_id)?;
+    if !path.exists() {
+        return Err("任务所在目录不存在".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("打开目录失败: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("打开目录失败: {}", e))?;
+
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("打开目录失败: {}", e))?;
+
+    Ok(())
+}
+
+/// 将下载完成的本地视频注册到内部媒体协议。
+#[tauri::command]
+pub fn get_downloaded_play_url(
+    download_manager: State<'_, Arc<DownloadManager>>,
+    media_proxy: State<'_, Arc<MediaProxyServer>>,
+    task_id: String,
+) -> Result<String, String> {
+    let file_path = download_manager.get_downloaded_file(&task_id)?;
+    media_proxy.register_local_file(file_path)
 }

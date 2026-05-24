@@ -6,19 +6,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Semaphore;
 
 use super::ffmpeg::FfmpegExecutor;
 use crate::config::{CodecType, Config, FileExistAction, VideoQuality};
 use crate::danmaku::{convert_to_ass, AssConfig};
-use crate::events::{DownloadEvent, TaskState};
+use crate::events::{DownloadEvent, DownloadStage, TaskState};
 
 /// 下载任务状态
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DownloadTaskState {
     Pending,
     Downloading,
+    Merging,
     Paused,
     Completed,
     Failed,
@@ -38,6 +40,8 @@ pub struct DownloadProgress {
     #[serde(default)]
     pub duration: i64,
     pub state: DownloadTaskState,
+    #[serde(default)]
+    pub stage: DownloadStage,
     pub progress: f64,
     pub total_size: u64,
     pub downloaded_size: u64,
@@ -45,6 +49,10 @@ pub struct DownloadProgress {
     pub video_url: Option<String>,
     pub audio_url: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 /// 下载管理器
@@ -102,6 +110,7 @@ impl DownloadManager {
             Self::speed_loop(app_clone, byte_per_sec_clone).await;
         });
 
+        manager.restore_tasks();
         manager
     }
 
@@ -180,6 +189,7 @@ impl DownloadManager {
                     .map(|page| page.duration as i64)
                     .unwrap_or(video_info.duration as i64),
                 state: DownloadTaskState::Pending,
+                stage: DownloadStage::Pending,
                 progress: 0.0,
                 total_size: 0,
                 downloaded_size: 0,
@@ -187,6 +197,8 @@ impl DownloadManager {
                 video_url: video_url.clone(),
                 audio_url: audio_url.clone(),
                 error: None,
+                output_path: None,
+                created_at: Self::now_millis(),
             };
 
             // 保存进度
@@ -263,6 +275,7 @@ impl DownloadManager {
                 DownloadEvent::TaskStateUpdate {
                     task_id: task_id.clone(),
                     state: TaskState::Downloading,
+                    error: None,
                 },
             );
 
@@ -277,13 +290,21 @@ impl DownloadManager {
             )
             .await;
 
+            // A deleted or restarted task may finish an in-flight operation later.
+            // Its stale worker must not recreate deleted progress state.
+            if control.is_cancelled() {
+                return;
+            }
+
             // 更新最终状态
-            {
+            let should_persist = {
                 let mut progress = task_arc.write();
                 match result {
                     Ok(DownloadEnd::Completed) => {
                         progress.state = DownloadTaskState::Completed;
+                        progress.stage = DownloadStage::Completed;
                         progress.progress = 100.0;
+                        progress.speed = 0.0;
 
                         // 发送完成事件
                         let _ = app.emit(
@@ -291,19 +312,25 @@ impl DownloadManager {
                             DownloadEvent::TaskStateUpdate {
                                 task_id: task_id.clone(),
                                 state: TaskState::Completed,
+                                error: None,
                             },
                         );
+                        true
                     }
                     Ok(DownloadEnd::Paused) => {
                         progress.state = DownloadTaskState::Paused;
+                        progress.stage = DownloadStage::Paused;
+                        progress.speed = 0.0;
 
                         let _ = app.emit(
                             "download://state_change",
                             DownloadEvent::TaskStateUpdate {
                                 task_id: task_id.clone(),
                                 state: TaskState::Paused,
+                                error: None,
                             },
                         );
+                        true
                     }
                     Ok(DownloadEnd::Cancelled) => {
                         let _ = app.emit(
@@ -312,9 +339,12 @@ impl DownloadManager {
                                 task_id: task_id.clone(),
                             },
                         );
+                        false
                     }
                     Err(e) => {
                         progress.state = DownloadTaskState::Failed;
+                        progress.stage = DownloadStage::Failed;
+                        progress.speed = 0.0;
                         progress.error = Some(e.clone());
 
                         // 发送错误事件
@@ -323,9 +353,16 @@ impl DownloadManager {
                             DownloadEvent::TaskStateUpdate {
                                 task_id: task_id.clone(),
                                 state: TaskState::Failed,
+                                error: Some(e),
                             },
                         );
+                        true
                     }
+                }
+            };
+            if should_persist {
+                if let Err(error) = Self::save_progress_for_app(&app, &task_arc.read()) {
+                    log::warn!("保存任务进度失败 [{}]: {}", task_id, error);
                 }
             }
             let should_remove_control = controls
@@ -401,6 +438,7 @@ impl DownloadManager {
                 task,
                 &byte_per_sec,
                 &control,
+                DownloadStage::DownloadingVideo,
             )
             .await?
             {
@@ -421,6 +459,7 @@ impl DownloadManager {
                 task,
                 &byte_per_sec,
                 &control,
+                DownloadStage::DownloadingAudio,
             )
             .await?
             {
@@ -444,11 +483,11 @@ impl DownloadManager {
                 return Ok(DownloadEnd::Completed);
             };
 
-            let Some(output_path) = Self::resolve_existing_file(
-                download_path.join(format!("{}.mp4", safe_title)),
-                &file_exist_action,
-            )?
+            let expected_output_path = download_path.join(format!("{}.mp4", safe_title));
+            let Some(output_path) =
+                Self::resolve_existing_file(expected_output_path.clone(), &file_exist_action)?
             else {
+                task.write().output_path = Some(expected_output_path.to_string_lossy().to_string());
                 return Ok(DownloadEnd::Completed);
             };
 
@@ -458,14 +497,23 @@ impl DownloadManager {
             if ffmpeg.is_available() {
                 log::info!("开始使用 FFmpeg 合并音视频: {}", title);
 
+                {
+                    let mut progress = task.write();
+                    progress.state = DownloadTaskState::Merging;
+                    progress.stage = DownloadStage::Merging;
+                    progress.speed = 0.0;
+                }
+
                 // 发送合并状态
                 let _ = app.emit(
                     "download://state_change",
                     DownloadEvent::TaskStateUpdate {
                         task_id: task_id.to_string(),
                         state: TaskState::Merging,
+                        error: None,
                     },
                 );
+                Self::emit_progress_snapshot(app, task_id, task, TaskState::Merging);
 
                 match ffmpeg
                     .merge_audio_video(video, audio, &output_path, None)
@@ -473,6 +521,7 @@ impl DownloadManager {
                 {
                     Ok(path) => {
                         log::info!("FFmpeg 合并完成: {}", path.display());
+                        task.write().output_path = Some(path.to_string_lossy().to_string());
                         // 合并成功后删除临时文件
                         let _ = tokio::fs::remove_file(video).await;
                         let _ = tokio::fs::remove_file(audio).await;
@@ -509,8 +558,20 @@ impl DownloadManager {
         task: &Arc<RwLock<DownloadProgress>>,
         byte_per_sec: &Arc<AtomicU64>,
         control: &Arc<TaskControl>,
+        stage: DownloadStage,
     ) -> Result<DownloadEnd, String> {
         let client = app.state::<Arc<crate::api::BiliClient>>().media_client();
+
+        {
+            let mut progress = task.write();
+            progress.state = DownloadTaskState::Downloading;
+            progress.stage = stage;
+            progress.progress = 0.0;
+            progress.total_size = 0;
+            progress.downloaded_size = 0;
+            progress.speed = 0.0;
+        }
+        Self::emit_progress_snapshot(app, task_id, task, TaskState::Downloading);
 
         let response = client
             .get(url)
@@ -532,6 +593,7 @@ impl DownloadManager {
             let mut progress = task.write();
             progress.total_size = total_size;
         }
+        Self::emit_progress_snapshot(app, task_id, task, TaskState::Downloading);
 
         let mut file = tokio::fs::File::create(path)
             .await
@@ -541,6 +603,7 @@ impl DownloadManager {
         let mut downloaded: u64 = 0;
         let mut bytes_since_tick: u64 = 0;
         let mut last_speed_tick = Instant::now();
+        let mut next_progress_emit: u64 = 256 * 1024;
 
         use futures_util::StreamExt;
         while let Some(chunk) = stream.next().await {
@@ -578,8 +641,9 @@ impl DownloadManager {
                 progress.progress
             };
 
-            // 发送进度事件 (每 1MB 发送一次，避免过于频繁)
-            if downloaded % (1024 * 1024) == 0 || downloaded == total_size {
+            // Stream chunks rarely land on exact size boundaries; emit once a threshold is crossed.
+            if downloaded >= next_progress_emit || downloaded == total_size {
+                next_progress_emit = downloaded.saturating_add(256 * 1024);
                 let progress_data = task.read().clone();
                 let _ = app.emit(
                     "download://progress",
@@ -595,6 +659,7 @@ impl DownloadManager {
                             url: None,
                             download_dir: String::new(),
                             state: crate::events::TaskState::Downloading,
+                            stage: progress_data.stage,
                             downloaded_count: downloaded,
                             total_count: total_size,
                             speed: String::new(),
@@ -607,6 +672,36 @@ impl DownloadManager {
         Ok(DownloadEnd::Completed)
     }
 
+    fn emit_progress_snapshot(
+        app: &AppHandle,
+        task_id: &str,
+        task: &Arc<RwLock<DownloadProgress>>,
+        state: TaskState,
+    ) {
+        let progress_data = task.read().clone();
+        let _ = app.emit(
+            "download://progress",
+            DownloadEvent::ProgressUpdate {
+                progress: crate::events::DownloadProgress {
+                    task_id: task_id.to_string(),
+                    episode_type: crate::events::EpisodeType::Normal,
+                    aid: progress_data.aid,
+                    bvid: Some(progress_data.bvid),
+                    cid: progress_data.cid,
+                    episode_title: progress_data.title,
+                    collection_title: String::new(),
+                    url: None,
+                    download_dir: String::new(),
+                    state,
+                    stage: progress_data.stage,
+                    downloaded_count: progress_data.downloaded_size,
+                    total_count: progress_data.total_size,
+                    speed: String::new(),
+                },
+            },
+        );
+    }
+
     /// 暂停下载任务
     pub async fn pause_download_tasks(&self, task_ids: Vec<String>) -> Result<(), String> {
         for task_id in task_ids {
@@ -617,11 +712,17 @@ impl DownloadManager {
                     DownloadTaskState::Downloading | DownloadTaskState::Pending
                 ) {
                     progress.state = DownloadTaskState::Paused;
+                    progress.stage = DownloadStage::Paused;
+                    progress.speed = 0.0;
+                    let snapshot = progress.clone();
+                    drop(progress);
+                    self.save_progress(&snapshot)?;
                     let _ = self.app.emit(
                         "download://state_change",
                         DownloadEvent::TaskStateUpdate {
                             task_id: task_id.clone(),
                             state: TaskState::Paused,
+                            error: None,
                         },
                     );
                 }
@@ -637,6 +738,10 @@ impl DownloadManager {
                 let mut progress = task.write();
                 if progress.state == DownloadTaskState::Paused {
                     progress.state = DownloadTaskState::Pending;
+                    progress.stage = DownloadStage::Pending;
+                    let snapshot = progress.clone();
+                    drop(progress);
+                    self.save_progress(&snapshot)?;
                     self.controls
                         .write()
                         .insert(task_id.clone(), Arc::new(TaskControl::new()));
@@ -648,10 +753,37 @@ impl DownloadManager {
     }
 
     /// 删除下载任务
-    pub async fn delete_download_tasks(&self, task_ids: Vec<String>) -> Result<(), String> {
+    pub async fn delete_download_tasks(
+        &self,
+        task_ids: Vec<String>,
+        delete_files: bool,
+    ) -> Result<(), String> {
+        if delete_files {
+            for task_id in &task_ids {
+                if let Some(task) = self.tasks.read().get(task_id) {
+                    if matches!(
+                        task.read().state,
+                        DownloadTaskState::Downloading | DownloadTaskState::Merging
+                    ) {
+                        return Err("请先暂停正在下载的任务，再同步删除本地文件".to_string());
+                    }
+                }
+            }
+        }
+
         for task_id in task_ids {
+            let snapshot = self
+                .tasks
+                .read()
+                .get(&task_id)
+                .map(|task| task.read().clone());
             if let Some(control) = self.controls.read().get(&task_id) {
                 control.cancel();
+            }
+            if delete_files {
+                if let Some(progress) = snapshot.as_ref() {
+                    self.delete_task_files(progress).await?;
+                }
             }
             self.tasks.write().remove(&task_id);
             self.controls.write().remove(&task_id);
@@ -675,10 +807,15 @@ impl DownloadManager {
             if let Some(task) = self.tasks.read().get(&task_id) {
                 let mut progress = task.write();
                 progress.state = DownloadTaskState::Pending;
+                progress.stage = DownloadStage::Pending;
                 progress.progress = 0.0;
                 progress.downloaded_size = 0;
                 progress.speed = 0.0;
                 progress.error = None;
+                progress.output_path = None;
+                let snapshot = progress.clone();
+                drop(progress);
+                self.save_progress(&snapshot)?;
             }
             self.controls
                 .write()
@@ -690,11 +827,67 @@ impl DownloadManager {
 
     /// 获取所有任务
     pub fn get_all_tasks(&self) -> Vec<DownloadProgress> {
-        self.tasks
+        let mut tasks: Vec<_> = self
+            .tasks
             .read()
             .values()
             .map(|t| t.read().clone())
-            .collect()
+            .collect();
+        tasks.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        tasks
+    }
+
+    /// 获取任务成品文件，供本地播放使用。
+    pub fn get_downloaded_file(&self, task_id: &str) -> Result<PathBuf, String> {
+        let progress = self
+            .tasks
+            .read()
+            .get(task_id)
+            .map(|task| task.read().clone())
+            .ok_or_else(|| "下载任务不存在".to_string())?;
+
+        if progress.state != DownloadTaskState::Completed {
+            return Err("任务尚未下载完成".to_string());
+        }
+
+        self.find_existing_output_file(&progress)
+            .ok_or_else(|| "没有找到可播放的已下载 MP4 文件".to_string())
+    }
+
+    fn find_existing_output_file(&self, progress: &DownloadProgress) -> Option<PathBuf> {
+        if let Some(path) = progress.output_path.as_deref().map(PathBuf::from) {
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+
+        let folder = self.task_output_dir(progress).ok()?;
+        let mut candidates = std::fs::read_dir(&folder)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+        });
+        candidates.pop()
+    }
+
+    pub fn get_task_folder(&self, task_id: &str) -> Result<PathBuf, String> {
+        let progress = self
+            .tasks
+            .read()
+            .get(task_id)
+            .map(|task| task.read().clone())
+            .ok_or_else(|| "下载任务不存在".to_string())?;
+        self.task_output_dir(&progress)
     }
 
     /// 获取任务数量
@@ -707,13 +900,22 @@ impl DownloadManager {
         self.tasks
             .read()
             .values()
-            .filter(|t| t.read().state == DownloadTaskState::Downloading)
+            .filter(|t| {
+                matches!(
+                    t.read().state,
+                    DownloadTaskState::Downloading | DownloadTaskState::Merging
+                )
+            })
             .count()
     }
 
     /// 保存进度到文件
     fn save_progress(&self, progress: &DownloadProgress) -> Result<(), String> {
-        let task_dir = self.get_task_dir()?;
+        Self::save_progress_for_app(&self.app, progress)
+    }
+
+    fn save_progress_for_app(app: &AppHandle, progress: &DownloadProgress) -> Result<(), String> {
+        let task_dir = Self::task_data_dir(app)?;
         std::fs::create_dir_all(&task_dir).map_err(|e| format!("创建任务目录失败: {}", e))?;
 
         let task_file = task_dir.join(format!("{}.json", progress.task_id));
@@ -725,7 +927,7 @@ impl DownloadManager {
 
     /// 删除进度文件
     fn delete_progress_file(&self, task_id: &str) -> Result<(), String> {
-        let task_dir = self.get_task_dir()?;
+        let task_dir = Self::task_data_dir(&self.app)?;
         let task_file = task_dir.join(format!("{}.json", task_id));
         if task_file.exists() {
             std::fs::remove_file(task_file).map_err(|e| format!("删除进度文件失败: {}", e))?;
@@ -735,12 +937,90 @@ impl DownloadManager {
 
     /// 获取任务目录
     fn get_task_dir(&self) -> Result<PathBuf, String> {
-        let app_data_dir = self
-            .app
+        Self::task_data_dir(&self.app)
+    }
+
+    fn task_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+        let app_data_dir = app
             .path()
             .app_data_dir()
             .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
         Ok(app_data_dir.join(".download_tasks"))
+    }
+
+    fn restore_tasks(&self) {
+        let Ok(task_dir) = self.get_task_dir() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(task_dir) else {
+            return;
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let Ok(mut progress) = serde_json::from_str::<DownloadProgress>(&content) else {
+                continue;
+            };
+            if let Some(output_path) = self.find_existing_output_file(&progress) {
+                progress.output_path = Some(output_path.to_string_lossy().to_string());
+                progress.state = DownloadTaskState::Completed;
+                progress.stage = DownloadStage::Completed;
+                progress.progress = 100.0;
+                progress.speed = 0.0;
+            } else if matches!(
+                progress.state,
+                DownloadTaskState::Pending
+                    | DownloadTaskState::Downloading
+                    | DownloadTaskState::Merging
+            ) {
+                progress.state = DownloadTaskState::Paused;
+                progress.stage = DownloadStage::Paused;
+                progress.speed = 0.0;
+            }
+            self.tasks.write().insert(
+                progress.task_id.clone(),
+                Arc::new(RwLock::new(progress.clone())),
+            );
+            self.controls
+                .write()
+                .insert(progress.task_id.clone(), Arc::new(TaskControl::new()));
+            let _ = self.save_progress(&progress);
+        }
+    }
+
+    fn task_output_dir(&self, progress: &DownloadProgress) -> Result<PathBuf, String> {
+        if let Some(output_path) = progress.output_path.as_deref().map(PathBuf::from) {
+            if let Some(parent) = output_path.parent() {
+                return Ok(parent.to_path_buf());
+            }
+        }
+        let config = self.app.state::<Arc<RwLock<Config>>>();
+        let root = Config::resolve_download_dir(&self.app, &config.read().download_dir)?;
+        Ok(root.join(Self::sanitize_path_component(&progress.title)))
+    }
+
+    async fn delete_task_files(&self, progress: &DownloadProgress) -> Result<(), String> {
+        let config = self.app.state::<Arc<RwLock<Config>>>();
+        let root = Config::resolve_download_dir(&self.app, &config.read().download_dir)?;
+        let folder = self.task_output_dir(progress)?;
+        if !folder.starts_with(&root) {
+            return Err("拒绝删除下载目录以外的文件".to_string());
+        }
+        if folder.exists() {
+            tokio::fs::remove_dir_all(&folder)
+                .await
+                .map_err(|e| format!("删除本地文件失败: {}", e))?;
+        }
+        Ok(())
+    }
+
+    fn now_millis() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default()
     }
 
     fn sanitize_path_component(input: &str) -> String {

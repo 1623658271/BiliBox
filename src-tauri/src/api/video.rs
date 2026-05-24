@@ -22,6 +22,8 @@ pub struct VideoInfo {
     pub cid: i64,
     pub title: String,
     pub duration: u64,
+    #[serde(default)]
+    pub pubdate: Option<i64>,
     #[serde(default, alias = "desc")]
     pub description: String,
     pub pic: String,
@@ -156,8 +158,13 @@ pub struct KeywordVideoResult {
     pub title: String,
     pub pic: String,
     pub duration: String,
+    pub mid: i64,
     pub author: String,
+    pub author_face: String,
+    pub pubdate: i64,
     pub play: i64,
+    pub danmaku: i64,
+    pub favorite: i64,
     pub description: String,
 }
 
@@ -844,17 +851,23 @@ fn parse_keyword_video_results(data: &Value) -> Vec<KeywordVideoResult> {
                             .and_then(|value| value.as_str())
                             .unwrap_or("")
                             .to_string(),
+                        mid: parse_i64_field(item, &["mid", "up_id", "author_id"]),
                         author: item
                             .get("author")
                             .and_then(|value| value.as_str())
                             .unwrap_or("")
                             .to_string(),
-                        play: item
-                            .get("play")
+                        author_face: item
+                            .get("upic")
+                            .or_else(|| item.get("face"))
+                            .or_else(|| item.get("avatar"))
                             .and_then(|value| value.as_str())
-                            .and_then(|value| value.replace(',', "").parse::<i64>().ok())
-                            .or_else(|| item.get("play").and_then(|value| value.as_i64()))
-                            .unwrap_or(0),
+                            .unwrap_or("")
+                            .to_string(),
+                        pubdate: parse_i64_field(item, &["pubdate", "senddate"]),
+                        play: parse_i64_field(item, &["play", "view"]),
+                        danmaku: parse_i64_field(item, &["video_review", "danmaku"]),
+                        favorite: parse_i64_field(item, &["favorites", "favorite"]),
                         description: clean_search_text(
                             item.get("description")
                                 .and_then(|value| value.as_str())
@@ -906,6 +919,40 @@ fn parse_keyword_bangumi_results(data: &Value) -> Vec<KeywordBangumiResult> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_i64_field(item: &Value, names: &[&str]) -> i64 {
+    names
+        .iter()
+        .find_map(|name| item.get(*name).and_then(parse_i64_value))
+        .unwrap_or(0)
+}
+
+fn parse_i64_value(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+
+    let raw = value.as_str()?.trim().replace(',', "");
+    if raw.is_empty() || raw == "-" {
+        return Some(0);
+    }
+
+    if let Some(number) = raw.strip_suffix('万') {
+        return number
+            .parse::<f64>()
+            .ok()
+            .map(|number| (number * 10_000.0).round() as i64);
+    }
+
+    if let Some(number) = raw.strip_suffix('亿') {
+        return number
+            .parse::<f64>()
+            .ok()
+            .map(|number| (number * 100_000_000.0).round() as i64);
+    }
+
+    raw.parse::<i64>().ok()
 }
 
 fn clean_search_text(value: &str) -> String {

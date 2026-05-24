@@ -136,6 +136,7 @@ pub fn run() {
             commands::restart_download_tasks,
             commands::get_download_task_count,
             commands::get_active_download_count,
+            commands::get_downloaded_play_url,
             commands::get_fav_folders,
             commands::get_fav_info,
             commands::get_history_info,
@@ -153,6 +154,7 @@ pub fn run() {
             commands::disable_plugin,
             commands::get_plugin_dir,
             commands::open_download_folder,
+            commands::open_download_task_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

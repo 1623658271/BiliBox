@@ -1,12 +1,17 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   Calendar,
   Copy,
   Download,
+  Eye,
   ExternalLink,
+  Heart,
   Loader2,
+  MessageCircle,
   Play,
   Search,
+  UserRound,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { invoke } from "@/lib/api";
@@ -14,40 +19,15 @@ import { notifyDownloadQueued } from "@/lib/download-feedback";
 import { openExternalUrl } from "@/lib/open-external";
 import type {
   AggregateSearchResult,
-  BangumiInfo,
+  SearchDate,
+  SearchDuration,
+  SearchFilters,
+  SearchOrder,
+  SearchResponse,
   VideoInfo,
 } from "@/lib/types";
 import { useAppStore } from "@/stores/app-store";
-import { ensureHttps, formatBiliImageUrl, formatDuration, formatNumber } from "@/lib/utils";
-
-type SearchResponse =
-  | ({ type: "Normal" } & VideoInfo)
-  | ({
-      type: "Bangumi";
-      season_id: number;
-      title: string;
-      cover: string;
-      evaluate: string;
-      episodes: Array<{
-        ep_id: number;
-        bvid: string;
-        cid: number;
-        title: string;
-        long_title: string;
-        cover: string;
-        duration: number;
-      }>;
-    })
-  | ({ type: "Aggregate" } & AggregateSearchResult);
-
-type SearchOrder = "totalrank" | "click" | "pubdate" | "dm" | "stow";
-type SearchDate = "0" | "1" | "7" | "30" | "365";
-type SearchDuration = "0" | "1" | "2" | "3" | "4";
-type SearchFilters = {
-  order: SearchOrder;
-  pubtime: SearchDate;
-  duration: SearchDuration;
-};
+import { formatBiliImageUrl, formatDateTime, formatDuration, formatNumber } from "@/lib/utils";
 
 const orderOptions: Array<{ value: SearchOrder; label: string }> = [
   { value: "totalrank", label: "综合排序" },
@@ -75,19 +55,29 @@ const durationOptions: Array<{ value: SearchDuration; label: string }> = [
 
 export function SearchView() {
   const openPlayer = useAppStore((s) => s.openPlayer);
+  const searchPageState = useAppStore((s) => s.searchPageState);
+  const setSearchPageState = useAppStore((s) => s.setSearchPageState);
   const searchRequestIdRef = useRef(0);
-  const [searchInput, setSearchInput] = useState("");
-  const [searchOrder, setSearchOrder] = useState<SearchOrder>("totalrank");
-  const [searchDate, setSearchDate] = useState<SearchDate>("0");
-  const [searchDuration, setSearchDuration] = useState<SearchDuration>("0");
-  const [lastAggregateInput, setLastAggregateInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [result, setResult] = useState<SearchResponse | null>(null);
+  const {
+    input: searchInput,
+    filters: currentFilters,
+    lastAggregateInput,
+    result,
+    aggregateSnapshot,
+  } = searchPageState;
 
   const placeholder = useMemo(
     () => "输入关键词、BV/AV、ep/ss、视频链接或番剧链接",
     []
+  );
+
+  const setSearchInput = useCallback(
+    (input: string) => {
+      setSearchPageState({ input });
+    },
+    [setSearchPageState]
   );
 
   const runSearch = useCallback(async (rawInput: string, filters: SearchFilters) => {
@@ -109,28 +99,25 @@ export function SearchView() {
         duration: filters.duration,
       });
       if (requestId !== searchRequestIdRef.current) return;
-      setResult(data);
-      setLastAggregateInput(data.type === "Aggregate" ? input : "");
+      const latestState = useAppStore.getState().searchPageState;
+      const previousAggregate =
+        latestState.result?.type === "Aggregate" ? latestState.result : latestState.aggregateSnapshot;
+      setSearchPageState({
+        filters,
+        result: data,
+        lastAggregateInput: data.type === "Aggregate" ? input : latestState.lastAggregateInput,
+        aggregateSnapshot: data.type === "Aggregate" ? data : previousAggregate,
+      });
     } catch (err) {
       if (requestId !== searchRequestIdRef.current) return;
       setError(String(err));
-      setResult(null);
-      setLastAggregateInput("");
+      setSearchPageState({ result: null });
     } finally {
       if (requestId === searchRequestIdRef.current) {
         setLoading(false);
       }
     }
-  }, []);
-
-  const currentFilters = useMemo<SearchFilters>(
-    () => ({
-      order: searchOrder,
-      pubtime: searchDate,
-      duration: searchDuration,
-    }),
-    [searchDate, searchDuration, searchOrder]
-  );
+  }, [setSearchPageState]);
 
   const handleSearch = useCallback(
     async (rawInput = searchInput) => {
@@ -141,16 +128,27 @@ export function SearchView() {
 
   const updateFilters = useCallback(
     (nextFilters: SearchFilters) => {
-      setSearchOrder(nextFilters.order);
-      setSearchDate(nextFilters.pubtime);
-      setSearchDuration(nextFilters.duration);
+      setSearchPageState({ filters: nextFilters });
 
       if (result?.type === "Aggregate" && lastAggregateInput) {
         void runSearch(lastAggregateInput, nextFilters);
       }
     },
-    [lastAggregateInput, result?.type, runSearch]
+    [lastAggregateInput, result?.type, runSearch, setSearchPageState]
   );
+
+  const restoreAggregateResults = useCallback(() => {
+    if (!aggregateSnapshot) {
+      return;
+    }
+
+    setError("");
+    setSearchPageState({
+      result: aggregateSnapshot,
+      lastAggregateInput: aggregateSnapshot.keyword || lastAggregateInput,
+      input: searchInput || aggregateSnapshot.keyword || "",
+    });
+  }, [aggregateSnapshot, lastAggregateInput, searchInput, setSearchPageState]);
 
   const handleDownload = async (bvid: string, cid: number, title: string) => {
     try {
@@ -300,7 +298,7 @@ export function SearchView() {
       >
         <FilterSelect
           label="排序"
-          value={searchOrder}
+          value={currentFilters.order}
           options={orderOptions}
           onChange={(value) =>
             updateFilters({ ...currentFilters, order: value as SearchOrder })
@@ -308,7 +306,7 @@ export function SearchView() {
         />
         <FilterSelect
           label="日期"
-          value={searchDate}
+          value={currentFilters.pubtime}
           options={dateOptions}
           onChange={(value) =>
             updateFilters({ ...currentFilters, pubtime: value as SearchDate })
@@ -316,7 +314,7 @@ export function SearchView() {
         />
         <FilterSelect
           label="时长"
-          value={searchDuration}
+          value={currentFilters.duration}
           options={durationOptions}
           onChange={(value) =>
             updateFilters({ ...currentFilters, duration: value as SearchDuration })
@@ -357,6 +355,8 @@ export function SearchView() {
           {result.type === "Normal" ? (
             <NormalVideoResult
               video={result}
+              canBackToResults={Boolean(aggregateSnapshot)}
+              onBackToResults={restoreAggregateResults}
               onCopyBvid={handleCopyBvid}
               onDownload={handleDownload}
               onOpenBrowser={handleOpenBrowser}
@@ -367,6 +367,8 @@ export function SearchView() {
           {result.type === "Bangumi" ? (
             <BangumiResult
               bangumi={result}
+              canBackToResults={Boolean(aggregateSnapshot)}
+              onBackToResults={restoreAggregateResults}
               onDownload={handleDownload}
               onOpenBrowser={handleOpenBrowser}
               onOpenPlayer={handleOpenBangumiPlayer}
@@ -397,12 +399,16 @@ export function SearchView() {
 
 function NormalVideoResult({
   video,
+  canBackToResults,
+  onBackToResults,
   onCopyBvid,
   onDownload,
   onOpenBrowser,
   onOpenPlayer,
 }: {
   video: VideoInfo;
+  canBackToResults: boolean;
+  onBackToResults: () => void;
   onCopyBvid: (bvid: string) => void;
   onDownload: (bvid: string, cid: number, title: string) => void;
   onOpenBrowser: (url: string) => void;
@@ -465,22 +471,42 @@ function NormalVideoResult({
         </div>
 
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          {canBackToResults ? (
+            <button
+              onClick={onBackToResults}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                width: "fit-content",
+                marginBottom: "10px",
+                border: "none",
+                background: "transparent",
+                color: "#6366f1",
+                fontSize: "13px",
+                fontWeight: 700,
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              <ArrowLeft style={{ width: 14, height: 14 }} />
+              返回搜索结果
+            </button>
+          ) : null}
           <h3 style={{ fontSize: "18px", fontWeight: 700, color: "#1a1a2e", lineHeight: 1.45, marginBottom: "10px" }}>
             {video.title}
           </h3>
 
           <div style={{ display: "flex", alignItems: "center", gap: "9px", marginBottom: "12px" }}>
-            <img
-              src={ensureHttps(video.owner.face)}
-              alt={video.owner.name}
-              style={{ width: "28px", height: "28px", borderRadius: "50%", objectFit: "cover", border: "1.5px solid #ececf2" }}
-            />
+            <AvatarImage src={video.owner.face} alt={video.owner.name} size={30} />
             <span style={{ fontSize: "13.5px", color: "#505065", fontWeight: 500 }}>{video.owner.name}</span>
+            <span style={{ fontSize: "12.5px", color: "#9a9aa8" }}>发布于 {formatDateTime(video.pubdate)}</span>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "16px", fontSize: "13px", color: "#7a7a8c", flexWrap: "wrap" }}>
-            <span>播放 {formatNumber(video.stat.view)}</span>
-            <span>点赞 {formatNumber(video.stat.like)}</span>
+            <MetaPill icon={<Eye style={{ width: 13, height: 13 }} />} text={`播放 ${formatNumber(video.stat.view)}`} />
+            <MetaPill icon={<MessageCircle style={{ width: 13, height: 13 }} />} text={`弹幕 ${formatNumber(video.stat.danmaku)}`} />
+            <MetaPill icon={<Heart style={{ width: 13, height: 13 }} />} text={`收藏 ${formatNumber(video.stat.favorite)}`} />
             <button
               onClick={() => onCopyBvid(video.bvid)}
               style={{
@@ -534,9 +560,11 @@ function NormalVideoResult({
         title={video.title}
         lines={[
           ["BV", video.bvid],
+          ["发布时间", formatDateTime(video.pubdate)],
           ["时长", formatDuration(video.duration)],
           ["作者", video.owner.name],
           ["播放", formatNumber(video.stat.view)],
+          ["点赞", formatNumber(video.stat.like)],
         ]}
       />
     </div>
@@ -545,11 +573,15 @@ function NormalVideoResult({
 
 function BangumiResult({
   bangumi,
+  canBackToResults,
+  onBackToResults,
   onDownload,
   onOpenBrowser,
   onOpenPlayer,
 }: {
   bangumi: Extract<SearchResponse, { type: "Bangumi" }>;
+  canBackToResults: boolean;
+  onBackToResults: () => void;
   onDownload: (bvid: string, cid: number, title: string) => void;
   onOpenBrowser: (url: string) => void;
   onOpenPlayer: (bangumi: { season_id: number; title: string; cover: string }) => void;
@@ -587,6 +619,27 @@ function BangumiResult({
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
+          {canBackToResults ? (
+            <button
+              onClick={onBackToResults}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                marginBottom: "10px",
+                border: "none",
+                background: "transparent",
+                color: "#6366f1",
+                fontSize: "13px",
+                fontWeight: 700,
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              <ArrowLeft style={{ width: 14, height: 14 }} />
+              返回搜索结果
+            </button>
+          ) : null}
           <h3 style={{ fontSize: "18px", fontWeight: 700, color: "#1a1a2e", marginBottom: "10px" }}>
             {bangumi.title}
           </h3>
@@ -712,8 +765,11 @@ function AggregateVideoCard({
 }) {
   return (
     <div style={{ borderRadius: "16px", backgroundColor: "#fff", border: "1px solid #ececf2", padding: "16px" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "140px minmax(0, 1fr)", gap: "14px", alignItems: "start" }}>
-        <div style={{ aspectRatio: "16 / 9", borderRadius: "10px", overflow: "hidden", backgroundColor: "#f0f0f5" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "156px minmax(0, 1fr)", gap: "14px", alignItems: "start" }}>
+        <div
+          onClick={onPlay}
+          style={{ aspectRatio: "16 / 9", borderRadius: "10px", overflow: "hidden", backgroundColor: "#f0f0f5", position: "relative", cursor: "pointer" }}
+        >
           <img
             src={formatBiliImageUrl(video.pic, "@672w_378h_1c.webp")}
             alt={video.title}
@@ -721,12 +777,49 @@ function AggregateVideoCard({
             referrerPolicy="no-referrer"
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
+          <span
+            style={{
+              position: "absolute",
+              right: "7px",
+              bottom: "7px",
+              padding: "2px 7px",
+              borderRadius: "6px",
+              backgroundColor: "rgba(0,0,0,0.7)",
+              color: "#fff",
+              fontSize: "12px",
+              fontWeight: 700,
+            }}
+          >
+            {video.duration || "--:--"}
+          </span>
         </div>
         <div style={{ minWidth: 0 }}>
-          <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#1a1a2e", lineHeight: 1.45 }}>{video.title}</h3>
-          <p style={{ marginTop: "6px", fontSize: "12.5px", color: "#8b8b9a" }}>
-            {video.author} · {video.duration} · {formatNumber(video.play)}
-          </p>
+          <h3
+            style={{
+              fontSize: "15px",
+              fontWeight: 700,
+              color: "#1a1a2e",
+              lineHeight: 1.45,
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {video.title}
+          </h3>
+          <div style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+            <AvatarImage src={video.author_face || ""} alt={video.author} size={24} />
+            <span style={{ fontSize: "12.5px", color: "#505065", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {video.author || "未知 UP"}
+            </span>
+          </div>
+          <div style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "8px", color: "#8b8b9a", flexWrap: "wrap" }}>
+            <MetaPill icon={<Eye style={{ width: 13, height: 13 }} />} text={formatNumber(video.play)} />
+            <MetaPill icon={<MessageCircle style={{ width: 13, height: 13 }} />} text={formatNumber(video.danmaku || 0)} />
+            <MetaPill icon={<Heart style={{ width: 13, height: 13 }} />} text={formatNumber(video.favorite || 0)} />
+            <MetaPill icon={<Calendar style={{ width: 13, height: 13 }} />} text={formatDateTime(video.pubdate)} />
+          </div>
           <p style={{ marginTop: "8px", fontSize: "13px", color: "#6b7280", lineHeight: 1.6 }}>
             {video.description || "暂无简介"}
           </p>
@@ -785,6 +878,72 @@ function AggregateBangumiCard({
         </GhostActionButton>
       </div>
     </div>
+  );
+}
+
+function AvatarImage({ src, alt, size }: { src: string; alt: string; size: number }) {
+  const normalizedSrc = formatBiliImageUrl(src, `@${size * 3}w_${size * 3}h_1c.webp`);
+  const fallback = (
+    <span
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#eef2ff",
+        color: "#6366f1",
+        border: "1.5px solid #ececf2",
+        flexShrink: 0,
+      }}
+    >
+      <UserRound style={{ width: size * 0.56, height: size * 0.56 }} />
+    </span>
+  );
+
+  if (!normalizedSrc) {
+    return fallback;
+  }
+
+  return (
+    <span
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        overflow: "hidden",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#eef2ff",
+        border: "1.5px solid #ececf2",
+        flexShrink: 0,
+        position: "relative",
+        color: "#6366f1",
+      }}
+    >
+      <UserRound style={{ width: size * 0.56, height: size * 0.56, position: "absolute" }} />
+      <img
+        src={normalizedSrc}
+        alt={alt}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        onError={(event) => {
+          event.currentTarget.style.display = "none";
+        }}
+        style={{ width: "100%", height: "100%", objectFit: "cover", position: "relative" }}
+      />
+    </span>
+  );
+}
+
+function MetaPill({ icon, text }: { icon: React.ReactNode; text: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "4px", whiteSpace: "nowrap" }}>
+      {icon}
+      {text}
+    </span>
   );
 }
 

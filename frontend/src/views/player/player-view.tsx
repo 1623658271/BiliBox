@@ -13,6 +13,7 @@ interface EpisodeOption {
   title: string;
   bvid: string;
   cid: number;
+  localTaskId?: string;
 }
 
 export function PlayerView() {
@@ -38,7 +39,28 @@ export function PlayerView() {
       throw new Error("缺少视频标识");
     }
 
-    const info = await invoke<VideoInfo>("get_normal_info", { bvid: playerState.bvid });
+    const localPlayUrl = playerState.localTaskId
+      ? await invoke<string>("get_downloaded_play_url", { taskId: playerState.localTaskId }).catch(() => "")
+      : "";
+    let info: VideoInfo;
+    try {
+      info = await invoke<VideoInfo>("get_normal_info", { bvid: playerState.bvid });
+    } catch (err) {
+      if (!localPlayUrl) throw err;
+      const fallbackEpisode = {
+        label: "本地文件",
+        title: playerState.title,
+        bvid: playerState.bvid,
+        cid: playerState.cid ?? 0,
+        localTaskId: playerState.localTaskId,
+      };
+      setVideoInfo(null);
+      setBangumiInfo(null);
+      setEpisodes([fallbackEpisode]);
+      setSelectedEpisode(fallbackEpisode);
+      setPlayUrl(localPlayUrl);
+      return;
+    }
     setVideoInfo(info);
     setBangumiInfo(null);
 
@@ -49,6 +71,7 @@ export function PlayerView() {
             title: page.part || info.title,
             bvid: info.bvid,
             cid: page.cid,
+            localTaskId: page.cid === playerState.cid ? playerState.localTaskId : undefined,
           }))
         : [
             {
@@ -56,13 +79,14 @@ export function PlayerView() {
               title: info.title,
               bvid: info.bvid,
               cid: playerState.cid ?? info.cid,
+              localTaskId: playerState.localTaskId,
             },
           ];
 
     setEpisodes(nextEpisodes);
     const nextSelected = nextEpisodes.find((episode) => episode.cid === (playerState.cid ?? info.cid)) ?? nextEpisodes[0] ?? null;
     setSelectedEpisode(nextSelected);
-    setPlayUrl(nextSelected ? await loadPlayableUrl(nextSelected.bvid, nextSelected.cid) : "");
+    setPlayUrl(nextSelected ? localPlayUrl || await loadPlayableUrl(nextSelected.bvid, nextSelected.cid) : "");
   }, [loadPlayableUrl, playerState]);
 
   const loadBangumiPlayer = useCallback(async () => {
@@ -136,7 +160,11 @@ export function PlayerView() {
     setLoading(true);
     setError("");
     try {
-      setPlayUrl(await loadPlayableUrl(episode.bvid, episode.cid));
+      setPlayUrl(
+        episode.localTaskId
+          ? await invoke<string>("get_downloaded_play_url", { taskId: episode.localTaskId })
+          : await loadPlayableUrl(episode.bvid, episode.cid)
+      );
     } catch (err) {
       setError(String(err));
       setPlayUrl("");
@@ -162,6 +190,40 @@ export function PlayerView() {
         },
       });
       notifyDownloadQueued(taskIds, selectedEpisode.title || currentTitle);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const handleDownloadAll = async () => {
+    if (!episodes.length) return;
+    try {
+      let taskIds: string[];
+      if (playerState?.kind === "video") {
+        taskIds = await invoke<string[]>("create_download_task", {
+          params: {
+            bvid: episodes[0].bvid,
+            cid: episodes[0].cid,
+            title: currentTitle,
+            cids: episodes.map((episode) => episode.cid),
+          },
+        });
+      } else {
+        const taskGroups = await Promise.all(
+          episodes.map((episode) =>
+            invoke<string[]>("create_download_task", {
+              params: {
+                bvid: episode.bvid,
+                cid: episode.cid,
+                title: `${currentTitle} - ${episode.title}`.trim(),
+                cids: [episode.cid],
+              },
+            })
+          )
+        );
+        taskIds = taskGroups.flat();
+      }
+      notifyDownloadQueued(taskIds, currentTitle);
     } catch (err) {
       setError(String(err));
     }
@@ -301,14 +363,23 @@ export function PlayerView() {
               <InfoRow label="类型" value={playerState.kind === "bangumi" ? "番剧" : "视频"} />
               {videoInfo ? <InfoRow label="时长" value={formatDuration(videoInfo.duration)} /> : null}
               {selectedEpisode ? <InfoRow label="当前" value={selectedEpisode.label} /> : null}
+              {selectedEpisode?.localTaskId ? <InfoRow label="来源" value="本地文件" /> : null}
               {episodes.length > 1 ? <InfoRow label="集数" value={`${episodes.length}`} /> : null}
             </div>
           </div>
 
           <div style={panelStyle}>
-            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#1a1a2e", marginBottom: "12px" }}>
-              {playerState.kind === "bangumi" ? "剧集列表" : "分 P 列表"}
-            </h3>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginBottom: "12px" }}>
+              <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#1a1a2e" }}>
+                {playerState.kind === "bangumi" ? "剧集列表" : "分 P 列表"}
+              </h3>
+              {episodes.length > 1 ? (
+                <button type="button" onClick={() => void handleDownloadAll()} style={episodeActionButtonStyle}>
+                  <Download style={{ width: 13, height: 13 }} />
+                  下载所有
+                </button>
+              ) : null}
+            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "420px", overflowY: "auto" }}>
               {episodes.map((episode) => {
                 const active = selectedEpisode?.cid === episode.cid;
@@ -447,4 +518,20 @@ const emptyPlayerStyle: React.CSSProperties = {
   gap: "10px",
   padding: "24px",
   textAlign: "center",
+};
+
+const episodeActionButtonStyle: React.CSSProperties = {
+  height: "30px",
+  padding: "0 10px",
+  borderRadius: "8px",
+  border: "1px solid #dedee7",
+  backgroundColor: "#fff",
+  color: "#6366f1",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "5px",
+  fontSize: "12px",
+  fontWeight: 600,
+  cursor: "pointer",
 };

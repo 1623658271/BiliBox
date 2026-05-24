@@ -484,7 +484,7 @@ function BangumiCard({
   return (
     <motion.div
       whileHover={{ y: -3 }}
-      onDoubleClick={onOpen}
+      onClick={onOpen}
       style={{
         display: isGrid ? "block" : "grid",
         gridTemplateColumns: isGrid ? undefined : `${144 * scale}px minmax(0, 1fr)`,
@@ -493,7 +493,7 @@ function BangumiCard({
         backgroundColor: "#fff",
         border: "1px solid #ececf2",
         overflow: "hidden",
-        cursor: "default",
+        cursor: "pointer",
       }}
     >
       <div
@@ -604,7 +604,7 @@ function BangumiCard({
         </div>
 
         <div style={{ marginTop: `${8 * scale}px`, fontSize: `${11.5 * scale}px`, color: "#9a9aa5" }}>
-          双击卡片进入播放页
+          单击卡片进入播放页
         </div>
       </div>
     </motion.div>

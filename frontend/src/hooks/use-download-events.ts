@@ -1,10 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@/lib/api";
 import { formatSpeed } from "@/lib/utils";
+import type { DownloadStage } from "@/lib/types";
 import { useDownloadStore, useLogStore, type DownloadStatus, type DownloadTask } from "@/stores/app-store";
 
-type BackendTaskState = "Pending" | "Downloading" | "Paused" | "Completed" | "Failed";
+type BackendTaskState = "Pending" | "Downloading" | "Merging" | "Paused" | "Completed" | "Failed";
 
 interface BackendDownloadProgress {
   task_id: string;
@@ -13,11 +14,14 @@ interface BackendDownloadProgress {
   title: string;
   cover?: string;
   state: BackendTaskState;
+  stage?: DownloadStage;
   progress: number;
   total_size: number;
   downloaded_size: number;
   speed: number;
   error?: string;
+  output_path?: string;
+  created_at?: number;
 }
 
 // 下载事件类型定义
@@ -32,6 +36,7 @@ interface DownloadProgress {
   url: string | null;
   download_dir: string;
   state: "pending" | "downloading" | "merging" | "completed" | "failed" | "paused";
+  stage?: DownloadStage;
   downloaded_count: number;
   total_count: number;
   speed: string;
@@ -45,8 +50,9 @@ function mapTaskState(state: TaskState): DownloadStatus {
     case "pending":
       return "pending";
     case "downloading":
-    case "merging":
       return "downloading";
+    case "merging":
+      return "merging";
     case "completed":
       return "completed";
     case "failed":
@@ -64,6 +70,8 @@ function mapBackendTaskState(state: BackendTaskState): DownloadStatus {
       return "pending";
     case "Downloading":
       return "downloading";
+    case "Merging":
+      return "merging";
     case "Paused":
       return "paused";
     case "Completed":
@@ -83,22 +91,64 @@ function mapBackendTask(task: BackendDownloadProgress): DownloadTask {
     progress: Math.max(0, Math.min(100, task.progress || 0)),
     speed: task.speed || 0,
     status: mapBackendTaskState(task.state),
+    stage: task.stage,
     bvid: task.bvid || undefined,
     cid: task.cid,
     totalBytes: task.total_size || 0,
     downloadedBytes: task.downloaded_size || 0,
     errorMessage: task.error,
+    outputPath: task.output_path,
+    createdAt: task.created_at,
   };
 }
 
 type DownloadEvent =
   | { event: "speed"; data: { speed: string } }
   | { event: "task_create"; data: { state: TaskState; progress: DownloadProgress } }
-  | { event: "task_state_update"; data: { task_id: string; state: TaskState } }
+  | { event: "task_state_update"; data: { task_id: string; state: TaskState; error?: string | null } }
   | { event: "task_sleeping"; data: { task_id: string; remaining_sec: number } }
   | { event: "task_delete"; data: { task_id: string } }
   | { event: "progress_preparing"; data: { task_id: string } }
   | { event: "progress_update"; data: { progress: DownloadProgress } };
+
+function stageLabel(stage?: DownloadStage, state?: TaskState | BackendTaskState): string {
+  switch (stage) {
+    case "downloading_video":
+      return "正在下载视频分片";
+    case "downloading_audio":
+      return "正在下载音频分片";
+    case "merging":
+      return "正在合并";
+    case "completed":
+      return "下载完成";
+    case "failed":
+      return "下载失败";
+    case "paused":
+      return "已暂停";
+    case "pending":
+      return "等待下载";
+  }
+
+  switch (state) {
+    case "downloading":
+    case "Downloading":
+      return "正在下载";
+    case "merging":
+    case "Merging":
+      return "正在合并";
+    case "completed":
+    case "Completed":
+      return "下载完成";
+    case "failed":
+    case "Failed":
+      return "下载失败";
+    case "paused":
+    case "Paused":
+      return "已暂停";
+    default:
+      return "等待下载";
+  }
+}
 
 /**
  * 监听下载事件，实时更新下载状态
@@ -110,6 +160,8 @@ export function useDownloadEvents() {
   const removeTask = useDownloadStore((s) => s.removeTask);
   const setDownloadSpeed = useDownloadStore((s) => s.setDownloadSpeed);
   const addLog = useLogStore((s) => s.addLog);
+  const stageLogRef = useRef<Record<string, string>>({});
+  const progressLogRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     const unlisteners: UnlistenFn[] = [];
@@ -121,7 +173,9 @@ export function useDownloadEvents() {
         if (cancelled) return;
         const tasks = Array.isArray(data) ? data.map(mapBackendTask) : [];
         replaceTasks(tasks);
-        const totalSpeed = tasks.reduce((sum, task) => sum + (task.speed || 0), 0);
+        const totalSpeed = tasks
+          .filter((task) => task.status === "downloading")
+          .reduce((sum, task) => sum + (task.speed || 0), 0);
         setDownloadSpeed(totalSpeed > 0 ? formatSpeed(totalSpeed) : "0 B/s");
       } catch (error) {
         console.error("Failed to sync download tasks:", error);
@@ -155,18 +209,37 @@ export function useDownloadEvents() {
             break;
           case "progress_update": {
             const progress = payload.data.progress;
+            const percent = progress.total_count > 0
+              ? (progress.downloaded_count / progress.total_count) * 100
+              : 0;
+            const stageText = stageLabel(progress.stage, progress.state);
             updateTask({
               id: progress.task_id,
               filename: progress.episode_title,
               bvid: progress.bvid || undefined,
               cid: progress.cid,
               status: mapTaskState(progress.state),
-              progress: progress.total_count > 0
-                ? (progress.downloaded_count / progress.total_count) * 100
-                : 0,
+              stage: progress.stage,
+              progress: percent,
               downloadedBytes: progress.downloaded_count,
               totalBytes: progress.total_count,
             });
+
+            const lastStage = stageLogRef.current[progress.task_id];
+            if (lastStage !== stageText) {
+              stageLogRef.current[progress.task_id] = stageText;
+              progressLogRef.current[progress.task_id] = -1;
+              addLog(`${progress.episode_title || progress.task_id}：${stageText}`, "info");
+            }
+
+            const progressBucket = Math.floor(percent / 10);
+            if (percent > 0 && progressBucket !== progressLogRef.current[progress.task_id]) {
+              progressLogRef.current[progress.task_id] = progressBucket;
+              addLog(
+                `${progress.episode_title || progress.task_id}：${stageText} ${Math.min(100, percent).toFixed(0)}%`,
+                "info"
+              );
+            }
             break;
           }
           case "task_delete":
@@ -183,10 +256,15 @@ export function useDownloadEvents() {
         const { payload } = event;
         if (payload.event === "task_state_update") {
           console.log("[Download] 状态变更:", payload.data.task_id, "->", payload.data.state);
-          addLog(`任务状态变更：${payload.data.task_id} -> ${payload.data.state}`, "info");
+          addLog(`任务状态变更：${payload.data.task_id} -> ${stageLabel(undefined, payload.data.state)}`, "info");
+          if (payload.data.state === "paused" || payload.data.state === "merging") {
+            setDownloadSpeed("0 B/s");
+          }
           updateTask({
             id: payload.data.task_id,
             status: mapTaskState(payload.data.state),
+            ...(payload.data.state === "merging" ? { stage: "merging" as DownloadStage } : {}),
+            ...(payload.data.state === "paused" ? { stage: "paused" as DownloadStage, speed: 0 } : {}),
           });
         } else if (payload.event === "task_delete") {
           addLog(`任务已删除：${payload.data.task_id}`, "warning");
@@ -203,10 +281,14 @@ export function useDownloadEvents() {
         if (payload.event === "task_state_update") {
           console.log("[Download] 下载完成:", payload.data.task_id);
           addLog(`下载完成：${payload.data.task_id}`, "success");
+          stageLogRef.current[payload.data.task_id] = "下载完成";
+          setDownloadSpeed("0 B/s");
           updateTask({
             id: payload.data.task_id,
             status: "completed",
+            stage: "completed",
             progress: 100,
+            speed: 0,
             finishedTime: Date.now(),
           });
         }
@@ -220,10 +302,15 @@ export function useDownloadEvents() {
         const { payload } = event;
         if (payload.event === "task_state_update") {
           console.error("[Download] 下载错误:", payload.data.task_id);
-          addLog(`下载失败：${payload.data.task_id}`, "error");
+          const reason = payload.data.error || "未知错误";
+          addLog(`下载失败：${payload.data.task_id}，原因：${reason}`, "error");
+          setDownloadSpeed("0 B/s");
           updateTask({
             id: payload.data.task_id,
             status: "error",
+            stage: "failed",
+            speed: 0,
+            errorMessage: reason,
           });
         }
       });

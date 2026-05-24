@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import type { DownloadStage, SearchFilters, SearchResponse } from "@/lib/types";
 
 export type ViewType =
   | "home"
@@ -23,11 +24,13 @@ export interface PlayerState {
   cid?: number;
   seasonId?: number;
   cover?: string;
+  localTaskId?: string;
 }
 
 export type DownloadStatus =
   | "pending"
   | "downloading"
+  | "merging"
   | "completed"
   | "error"
   | "paused"
@@ -40,6 +43,7 @@ export interface DownloadTask {
   progress: number;
   speed: number;
   status: DownloadStatus;
+  stage?: DownloadStage;
   isBatch?: boolean;
   bvid?: string;
   cid?: number;
@@ -50,6 +54,8 @@ export interface DownloadTask {
   startTime?: number;
   finishedTime?: number;
   errorMessage?: string;
+  outputPath?: string;
+  createdAt?: number;
 }
 
 export interface LogEntry {
@@ -74,6 +80,28 @@ export interface AppConfig {
   [key: string]: unknown;
 }
 
+export interface SearchPageState {
+  input: string;
+  filters: SearchFilters;
+  lastAggregateInput: string;
+  result: SearchResponse | null;
+  aggregateSnapshot: Extract<SearchResponse, { type: "Aggregate" }> | null;
+}
+
+const defaultSearchFilters: SearchFilters = {
+  order: "totalrank",
+  pubtime: "0",
+  duration: "0",
+};
+
+const defaultSearchPageState: SearchPageState = {
+  input: "",
+  filters: defaultSearchFilters,
+  lastAggregateInput: "",
+  result: null,
+  aggregateSnapshot: null,
+};
+
 interface AppState {
   currentView: ViewType;
   previousView: ViewType | null;
@@ -82,6 +110,10 @@ interface AppState {
   openPlayer: (playerState: PlayerState) => void;
   closePlayer: () => void;
   clearPlayer: () => void;
+
+  searchPageState: SearchPageState;
+  setSearchPageState: (state: Partial<SearchPageState>) => void;
+  resetSearchPageState: () => void;
 
   cardViewModes: Partial<Record<CardViewModeKey, CardViewMode>>;
   setCardViewMode: (key: CardViewModeKey, mode: CardViewMode) => void;
@@ -129,6 +161,16 @@ export const useAppStore = create<AppState>()(
           playerState: null,
         })),
       clearPlayer: () => set({ playerState: null }),
+
+      searchPageState: defaultSearchPageState,
+      setSearchPageState: (nextSearchState) =>
+        set((state) => ({
+          searchPageState: {
+            ...state.searchPageState,
+            ...nextSearchState,
+          },
+        })),
+      resetSearchPageState: () => set({ searchPageState: defaultSearchPageState }),
 
       cardViewModes: {
         favorites: "grid",
@@ -216,7 +258,9 @@ interface DownloadStore {
 }
 
 const countActiveTasks = (tasks: Record<string, DownloadTask>) =>
-  Object.values(tasks).filter((task) => task.status === "downloading" || task.status === "pending")
+  Object.values(tasks).filter(
+    (task) => task.status === "downloading" || task.status === "pending" || task.status === "merging"
+  )
     .length;
 
 export const useDownloadStore = create<DownloadStore>((set) => ({

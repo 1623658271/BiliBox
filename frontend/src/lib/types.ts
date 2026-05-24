@@ -134,8 +134,13 @@ export interface AggregateKeywordVideoResult {
   title: string;
   pic: string;
   duration: string;
+  mid?: number;
   author: string;
+  author_face?: string;
+  pubdate?: number;
   play: number;
+  danmaku?: number;
+  favorite?: number;
   description: string;
 }
 
@@ -153,6 +158,37 @@ export interface AggregateSearchResult {
   videos: AggregateKeywordVideoResult[];
   bangumi: AggregateKeywordBangumiResult[];
 }
+
+export type SearchOrder = "totalrank" | "click" | "pubdate" | "dm" | "stow";
+export type SearchDate = "0" | "1" | "7" | "30" | "365";
+export type SearchDuration = "0" | "1" | "2" | "3" | "4";
+
+export interface SearchFilters {
+  order: SearchOrder;
+  pubtime: SearchDate;
+  duration: SearchDuration;
+}
+
+export interface BangumiSearchResult {
+  season_id: number;
+  title: string;
+  cover: string;
+  evaluate: string;
+  episodes: Array<{
+    ep_id: number;
+    bvid: string;
+    cid: number;
+    title: string;
+    long_title: string;
+    cover: string;
+    duration: number;
+  }>;
+}
+
+export type SearchResponse =
+  | ({ type: "Normal" } & VideoInfo)
+  | ({ type: "Bangumi" } & BangumiSearchResult)
+  | ({ type: "Aggregate" } & AggregateSearchResult);
 
 // 追番信息项
 export interface BangumiFollowItem {
@@ -267,8 +303,23 @@ export interface CreateDownloadTaskParams {
   cids: number[];
 }
 
+export type DownloadStage =
+  | "pending"
+  | "downloading_video"
+  | "downloading_audio"
+  | "merging"
+  | "completed"
+  | "failed"
+  | "paused";
+
 /** 下载任务状态枚举（匹配后端 DownloadTaskState） */
-export type DownloadTaskState = "Pending" | "Downloading" | "Paused" | "Completed" | "Failed";
+export type DownloadTaskState =
+  | "Pending"
+  | "Downloading"
+  | "Merging"
+  | "Paused"
+  | "Completed"
+  | "Failed";
 
 /** 下载进度（匹配后端 DownloadProgress） */
 export interface DownloadProgress {
@@ -280,6 +331,7 @@ export interface DownloadProgress {
   cover?: string;
   duration?: number;
   state: DownloadTaskState;
+  stage?: DownloadStage;
   progress: number;
   total_size: number;
   downloaded_size: number;
@@ -287,6 +339,8 @@ export interface DownloadProgress {
   video_url?: string;
   audio_url?: string;
   error?: string;
+  output_path?: string;
+  created_at?: number;
 }
 
 /** 前端 UI 使用的下载任务格式 */
@@ -297,12 +351,15 @@ export interface DownloadTask {
   quality: string;
   format: string;
   state: DownloadTaskState;
+  stage?: DownloadStage;
   progress: number;
   total_size: number;
   downloaded_size: number;
   speed: number;
   remaining_time: string;
   error?: string;
+  output_path?: string;
+  created_at?: number;
 }
 
 // 插件信息

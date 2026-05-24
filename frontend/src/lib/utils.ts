@@ -37,6 +37,24 @@ export function formatNumber(num: number): string {
   return num.toString();
 }
 
+export function formatDateTime(timestamp?: number | null): string {
+  if (!timestamp) {
+    return "-";
+  }
+
+  const milliseconds = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  const date = new Date(milliseconds);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate()
+  ).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(
+    date.getMinutes()
+  ).padStart(2, "0")}`;
+}
+
 export function ensureHttps(url: string): string {
   const trimmed = url.trim();
   if (!trimmed) {

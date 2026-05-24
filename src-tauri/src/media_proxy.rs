@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,9 +19,14 @@ const MEDIA_PROTOCOL: &str = "bili-media";
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
 const MAX_CHUNK_SIZE: u64 = 2 * 1024 * 1024;
 
+#[derive(Clone)]
+enum ProxySource {
+    Remote { remote_url: String, referer: String },
+    Local { file_path: PathBuf },
+}
+
 struct ProxyEntry {
-    remote_url: String,
-    referer: String,
+    source: ProxySource,
     created_at: Instant,
 }
 
@@ -57,8 +63,10 @@ impl MediaProxyServer {
         self.entries.write().insert(
             token.clone(),
             ProxyEntry {
-                remote_url,
-                referer,
+                source: ProxySource::Remote {
+                    remote_url,
+                    referer,
+                },
                 created_at: Instant::now(),
             },
         );
@@ -72,6 +80,30 @@ impl MediaProxyServer {
             remote_host
         );
 
+        Ok(proxy_url)
+    }
+
+    pub fn register_local_file(&self, file_path: PathBuf) -> Result<String, String> {
+        self.prune_entries();
+        if !file_path.is_file() {
+            return Err("Downloaded media file does not exist".to_string());
+        }
+        let token = Uuid::new_v4().to_string();
+        self.entries.write().insert(
+            token.clone(),
+            ProxyEntry {
+                source: ProxySource::Local {
+                    file_path: file_path.clone(),
+                },
+                created_at: Instant::now(),
+            },
+        );
+        let proxy_url = build_media_protocol_url(&token);
+        log::info!(
+            "[MediaProxy] Registered local media: proxy_url={}, file={}",
+            proxy_url,
+            file_path.display()
+        );
         Ok(proxy_url)
     }
 
@@ -108,13 +140,11 @@ impl MediaProxyServer {
         };
 
         let token = target.trim_matches('/');
-        let entry = {
+        let source = {
             let entries = self.entries.read();
-            entries
-                .get(token)
-                .map(|entry| (entry.remote_url.clone(), entry.referer.clone()))
+            entries.get(token).map(|entry| entry.source.clone())
         };
-        let Some((remote_url, referer)) = entry else {
+        let Some(source) = source else {
             return Ok(build_text_response(
                 StatusCode::GONE,
                 "Media token expired".to_string(),
@@ -126,6 +156,16 @@ impl MediaProxyServer {
             .get(RANGE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
+
+        let (remote_url, referer) = match source {
+            ProxySource::Local { file_path } => {
+                return Self::serve_local_file(&method, file_path, original_range.as_deref()).await;
+            }
+            ProxySource::Remote {
+                remote_url,
+                referer,
+            } => (remote_url, referer),
+        };
         let effective_range = if method.as_str() == "HEAD" {
             Some("bytes=0-0".to_string())
         } else {
@@ -244,6 +284,62 @@ impl MediaProxyServer {
             .map_err(|e| format!("Failed to build protocol response: {}", e))
     }
 
+    async fn serve_local_file(
+        method: &tauri::http::Method,
+        file_path: PathBuf,
+        requested_range: Option<&str>,
+    ) -> Result<Response<Cow<'static, [u8]>>, String> {
+        let metadata = tokio::fs::metadata(&file_path)
+            .await
+            .map_err(|e| format!("Failed to inspect downloaded media: {}", e))?;
+        let total_size = metadata.len();
+        if total_size == 0 {
+            return Err("Downloaded media file is empty".to_string());
+        }
+
+        let (start, end) = local_range_window(requested_range, total_size);
+        let body_length = end.saturating_sub(start).saturating_add(1);
+        let body = if method.as_str() == "HEAD" {
+            Vec::new()
+        } else {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            let mut file = tokio::fs::File::open(&file_path)
+                .await
+                .map_err(|e| format!("Failed to open downloaded media: {}", e))?;
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|e| format!("Failed to seek downloaded media: {}", e))?;
+            let mut bytes = vec![0_u8; body_length as usize];
+            file.read_exact(&mut bytes)
+                .await
+                .map_err(|e| format!("Failed to read downloaded media: {}", e))?;
+            bytes
+        };
+
+        log::debug!(
+            "[MediaProxy] Serving local media: method={}, file={}, range=bytes={}-{}, body_bytes={}",
+            method,
+            file_path.display(),
+            start,
+            end,
+            body.len()
+        );
+
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(CONTENT_TYPE, "video/mp4")
+            .header(CONTENT_LENGTH, body_length.to_string())
+            .header(
+                CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, total_size),
+            )
+            .header(ACCEPT_RANGES, "bytes")
+            .header("Access-Control-Allow-Origin", "*")
+            .header(CACHE_CONTROL, "no-store")
+            .body(Cow::Owned(body))
+            .map_err(|e| format!("Failed to build local media response: {}", e))
+    }
+
     fn prune_entries(&self) {
         let now = Instant::now();
         let mut removed = 0_usize;
@@ -258,6 +354,39 @@ impl MediaProxyServer {
             log::debug!("[MediaProxy] Removed expired proxy tokens: {}", removed);
         }
     }
+}
+
+fn local_range_window(range: Option<&str>, total_size: u64) -> (u64, u64) {
+    let normalized = clamp_range_header(range, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE);
+    let spec = normalized.trim_start_matches("bytes=").trim();
+    if let Some(suffix) = spec
+        .strip_prefix('-')
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        let length = suffix.min(MAX_CHUNK_SIZE).min(total_size);
+        return (
+            total_size.saturating_sub(length),
+            total_size.saturating_sub(1),
+        );
+    }
+
+    let (start, end) = spec
+        .split_once('-')
+        .and_then(|(start, end)| {
+            let start = start.trim().parse::<u64>().ok()?;
+            let end = if end.trim().is_empty() {
+                start.saturating_add(DEFAULT_CHUNK_SIZE.saturating_sub(1))
+            } else {
+                end.trim().parse::<u64>().ok()?
+            };
+            Some((start, end))
+        })
+        .unwrap_or((0, DEFAULT_CHUNK_SIZE.saturating_sub(1)));
+    let start = start.min(total_size.saturating_sub(1));
+    let end = end
+        .min(start.saturating_add(MAX_CHUNK_SIZE.saturating_sub(1)))
+        .min(total_size.saturating_sub(1));
+    (start, end)
 }
 
 pub fn build_media_protocol_url(token: &str) -> String {

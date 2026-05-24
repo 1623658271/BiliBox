@@ -55,6 +55,7 @@ function isLoggedIn(userInfo: UserInfo) {
 
 export function HomeView() {
   const setView = useAppStore((s) => s.setView);
+  const openPlayer = useAppStore((s) => s.openPlayer);
   const taskMap = useDownloadStore((s) => s.tasks);
   const activeCount = useDownloadStore((s) => s.activeCount);
   const [stats, setStats] = useState<HomeStats>({
@@ -63,7 +64,10 @@ export function HomeView() {
     watchLater: "--",
     history: "--",
   });
-  const downloadTasks = useMemo(() => Object.values(taskMap), [taskMap]);
+  const downloadTasks = useMemo(
+    () => Object.values(taskMap).sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0)),
+    [taskMap]
+  );
 
   const fetchHomeData = useCallback(async () => {
     try {
@@ -129,7 +133,13 @@ export function HomeView() {
   const queueTasks = useMemo(
     () =>
       downloadTasks
-        .filter((task) => task.status === "downloading" || task.status === "pending" || task.status === "paused")
+        .filter(
+          (task) =>
+            task.status === "downloading" ||
+            task.status === "merging" ||
+            task.status === "pending" ||
+            task.status === "paused"
+        )
         .slice(0, 2),
     [downloadTasks]
   );
@@ -235,7 +245,20 @@ export function HomeView() {
           {recentTasks.length > 0 ? (
             <div className="bb-task-list">
               {recentTasks.map((task) => (
-                <RecentTaskItem key={task.id} task={task} />
+                <RecentTaskItem
+                  key={task.id}
+                  task={task}
+                  onPlay={() =>
+                    openPlayer({
+                      kind: "video",
+                      bvid: task.bvid,
+                      cid: task.cid,
+                      title: task.filename,
+                      cover: task.cover,
+                      localTaskId: task.id,
+                    })
+                  }
+                />
               ))}
             </div>
           ) : (
@@ -253,7 +276,15 @@ export function HomeView() {
           {queueTasks.length > 0 ? (
             <div className="bb-queue-list">
               {queueTasks.map((task) => (
-                <QueueTaskItem key={task.id} task={task} />
+                <QueueTaskItem
+                  key={task.id}
+                  task={task}
+                  onToggle={() =>
+                    void invoke(task.status === "paused" ? "resume_download_tasks" : "pause_download_tasks", {
+                      taskIds: [task.id],
+                    })
+                  }
+                />
               ))}
             </div>
           ) : (
@@ -358,10 +389,19 @@ function PanelHeader({
   );
 }
 
-function RecentTaskItem({ task }: { task: DownloadTask }) {
+function RecentTaskItem({ task, onPlay }: { task: DownloadTask; onPlay: () => void }) {
   const cover = formatBiliImageUrl(task.cover ?? "", "@180w_112h_1c.webp");
   return (
-    <div className="bb-recent-item">
+    <div
+      className="bb-recent-item"
+      role="button"
+      tabIndex={0}
+      onClick={onPlay}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onPlay();
+      }}
+      style={{ cursor: "pointer" }}
+    >
       <TaskCover cover={cover} title={task.filename} />
       <div className="bb-recent-copy">
         <strong>{task.filename || "未命名视频"}</strong>
@@ -371,14 +411,22 @@ function RecentTaskItem({ task }: { task: DownloadTask }) {
       </div>
       <span className="bb-task-done">已完成</span>
       <span className="bb-task-time">刚刚</span>
-      <button type="button" className="bb-task-more" aria-label="更多">
+      <button
+        type="button"
+        className="bb-task-more"
+        aria-label="打开所在目录"
+        onClick={(event) => {
+          event.stopPropagation();
+          void invoke("open_download_task_folder", { taskId: task.id });
+        }}
+      >
         <MoreVertical size={18} />
       </button>
     </div>
   );
 }
 
-function QueueTaskItem({ task }: { task: DownloadTask }) {
+function QueueTaskItem({ task, onToggle }: { task: DownloadTask; onToggle: () => void }) {
   const cover = formatBiliImageUrl(task.cover ?? "", "@160w_100h_1c.webp");
   const progress = clampPercent(task.progress);
   return (
@@ -390,19 +438,38 @@ function QueueTaskItem({ task }: { task: DownloadTask }) {
           <span style={{ width: `${progress}%` }} />
         </div>
         <div className="bb-queue-meta">
-          <span>
-            {formatFileSize(task.downloadedBytes || 0)} / {formatFileSize(task.totalBytes || 0)}
-          </span>
-          <span>·</span>
-          <span>{formatSpeed(task.speed || 0)}</span>
+          <span>{queueStageLabel(task)}</span>
+          {task.status === "downloading" ? (
+            <>
+              <span>·</span>
+              <span>{formatSpeed(task.speed || 0)}</span>
+            </>
+          ) : null}
         </div>
       </div>
       <strong className="bb-progress-percent">{progress.toFixed(0)}%</strong>
-      <button type="button" className="bb-queue-pause" aria-label={task.status === "paused" ? "继续" : "暂停"}>
+      <button type="button" className="bb-queue-pause" onClick={onToggle} aria-label={task.status === "paused" ? "继续" : "暂停"}>
         {task.status === "paused" ? <PlayCircle size={16} /> : <Pause size={16} />}
       </button>
     </div>
   );
+}
+
+function queueStageLabel(task: DownloadTask): string {
+  switch (task.stage) {
+    case "downloading_video":
+      return "正在下载视频分片";
+    case "downloading_audio":
+      return "正在下载音频分片";
+    case "merging":
+      return "正在合并";
+    case "paused":
+      return "已暂停";
+    case "pending":
+      return "等待下载";
+    default:
+      return `${formatFileSize(task.downloadedBytes || 0)} / ${formatFileSize(task.totalBytes || 0)}`;
+  }
 }
 
 function TaskCover({ cover, title, compact = false }: { cover: string; title: string; compact?: boolean }) {

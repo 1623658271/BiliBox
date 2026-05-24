@@ -1162,13 +1162,20 @@ body {
   padding: 0 22px 18px;
 }
 
+.bb-bottom-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
 .bb-bottom-tabs {
   display: inline-flex;
   gap: 4px;
   padding: 4px;
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.08);
-  margin-bottom: 12px;
 }
 
 .bb-bottom-tabs button {
@@ -1185,6 +1192,34 @@ body {
 .bb-bottom-tabs button.active {
   color: white;
   background: rgba(255, 255, 255, 0.14);
+}
+
+.bb-bottom-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.bb-bottom-bulk-actions button,
+.bb-bottom-task-actions button {
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.06);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.bb-bottom-bulk-actions button.danger,
+.bb-bottom-task-actions button.danger {
+  color: #fecaca;
 }
 
 .bb-bottom-scroll,
@@ -1228,6 +1263,11 @@ body {
   background: rgba(80, 110, 255, 0.22);
 }
 
+.bb-bottom-task-state.merging {
+  color: #f5d0fe;
+  background: rgba(192, 132, 252, 0.2);
+}
+
 .bb-bottom-task-state.completed {
   color: #9ef4c3;
   background: rgba(34, 197, 94, 0.18);
@@ -1260,6 +1300,14 @@ body {
   font-size: 11px;
 }
 
+.bb-bottom-task-error {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #fecaca;
+}
+
 .bb-bottom-task-progress {
   margin-top: 7px;
   height: 5px;
@@ -1282,6 +1330,17 @@ body {
   font-size: 12px;
   font-style: normal;
   font-weight: 900;
+}
+
+.bb-bottom-task-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bb-bottom-task-actions button {
+  width: 30px;
+  padding: 0;
 }
 
 .bb-bottom-log-panel {

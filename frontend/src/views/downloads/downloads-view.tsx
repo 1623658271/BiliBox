@@ -6,17 +6,17 @@ import {
   Pause,
   Trash2,
   RotateCcw,
-  MoreVertical,
   Search,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn, formatBiliImageUrl } from "@/lib/utils";
 import { invoke } from "@/lib/api";
-import { DownloadProgress, DownloadTaskState } from "@/lib/types";
+import { DownloadProgress, DownloadStage } from "@/lib/types";
 import { useAppStore } from "@/stores/app-store";
+import { DownloadDeleteDialog } from "@/components/download-delete-dialog";
 
 // ====== 类型定义 ======
-type TaskState = "Pending" | "Downloading" | "Paused" | "Completed" | "Failed";
+type TaskState = "Pending" | "Downloading" | "Merging" | "Paused" | "Completed" | "Failed";
 type FilterTab = "all" | "downloading" | "completed" | "paused" | "failed";
 
 interface DownloadTask {
@@ -26,12 +26,17 @@ interface DownloadTask {
   quality: string; // 如 "1080P 高码率"
   format: string; // 如 "MP4"
   state: TaskState;
+  stage?: DownloadStage;
   progress: number; // 0-100
   total_size: number; // bytes
   downloaded_size: number; // bytes
   speed: number; // bytes/s
   remaining_time: string; // 如 "00:08:32"
   error?: string;
+  bvid: string;
+  cid: number;
+  output_path?: string;
+  created_at?: number;
 }
 
 // ============================================================
@@ -45,17 +50,22 @@ function transformToUITask(progress: DownloadProgress): DownloadTask {
     quality: "自动",
     format: "MP4",
     state: progress.state,
+    stage: progress.stage,
     progress: progress.progress,
     total_size: progress.total_size,
     downloaded_size: progress.downloaded_size,
     speed: progress.speed,
     remaining_time: calculateRemainingTime(progress),
     error: progress.error,
+    bvid: progress.bvid,
+    cid: progress.cid,
+    output_path: progress.output_path,
+    created_at: progress.created_at,
   };
 }
 
 function calculateRemainingTime(progress: DownloadProgress): string {
-  if (progress.speed <= 0) return "--:--:--";
+  if (progress.state !== "Downloading" || progress.speed <= 0) return "";
   const remaining = progress.total_size - progress.downloaded_size;
   const seconds = remaining / progress.speed;
   const h = Math.floor(seconds / 3600);
@@ -73,14 +83,19 @@ export function DownloadsView() {
   const [activeTab, setActiveTab] = useState<FilterTab>("all");
   const [searchKeyword, setSearchKeyword] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[] | null>(null);
   const setView = useAppStore((s) => s.setView);
+  const openPlayer = useAppStore((s) => s.openPlayer);
   const pageSize = Math.max(4, Number(useAppStore((s) => s.config?.card_page_size ?? 12)));
 
   // 获取数据
   const fetchTasks = useCallback(async () => {
     try {
       const data = await invoke<DownloadProgress[]>("get_download_tasks");
-      const uiTasks = data.map(transformToUITask);
+      const uiTasks = data
+        .map(transformToUITask)
+        .sort((left, right) => (right.created_at ?? 0) - (left.created_at ?? 0));
       setTasks(uiTasks);
     } catch (e) {
       console.error("获取下载任务失败:", e);
@@ -94,11 +109,16 @@ export function DownloadsView() {
     return () => clearInterval(interval);
   }, [fetchTasks]);
 
+  useEffect(() => {
+    const existingIds = new Set(tasks.map((task) => task.task_id));
+    setSelectedTaskIds((selected) => new Set([...selected].filter((id) => existingIds.has(id))));
+  }, [tasks]);
+
   // 统计
   const stats = useMemo(() => {
     return {
       all: tasks.length,
-      downloading: tasks.filter((t) => t.state === "Downloading" || t.state === "Pending").length,
+      downloading: tasks.filter((t) => t.state === "Downloading" || t.state === "Merging" || t.state === "Pending").length,
       completed: tasks.filter((t) => t.state === "Completed").length,
       paused: tasks.filter((t) => t.state === "Paused").length,
       failed: tasks.filter((t) => t.state === "Failed").length,
@@ -110,7 +130,7 @@ export function DownloadsView() {
     let result = tasks;
     if (activeTab !== "all") {
       const stateMap: Record<Exclude<FilterTab, "all">, TaskState[]> = {
-        downloading: ["Downloading", "Pending"],
+        downloading: ["Downloading", "Merging", "Pending"],
         completed: ["Completed"],
         paused: ["Paused"],
         failed: ["Failed"],
@@ -154,10 +174,17 @@ export function DownloadsView() {
       console.error("恢复失败:", e);
     }
   };
-  const handleDelete = async (taskId: string) => {
+  const requestDelete = (taskIds: string[]) => {
+    if (taskIds.length) setPendingDeleteIds(taskIds);
+  };
+  const confirmDelete = async (deleteFiles: boolean) => {
+    const taskIds = pendingDeleteIds;
+    setPendingDeleteIds(null);
+    if (!taskIds?.length) return;
     try {
-      await invoke("delete_download_tasks", { taskIds: [taskId] });
-      fetchTasks();
+      await invoke("delete_download_tasks", { taskIds, deleteFiles });
+      setSelectedTaskIds((selected) => new Set([...selected].filter((id) => !taskIds.includes(id))));
+      await fetchTasks();
     } catch (e) {
       console.error("删除失败:", e);
     }
@@ -170,15 +197,18 @@ export function DownloadsView() {
       console.error("重启失败:", e);
     }
   };
-  const handleOpenFolder = async () => {
+  const handleOpenFolder = async (taskId?: string) => {
     try {
-      await invoke("open_download_folder");
+      await invoke(taskId ? "open_download_task_folder" : "open_download_folder", taskId ? { taskId } : undefined);
     } catch (e) {
       console.error("打开目录失败:", e);
     }
   };
   const handleStartAll = async () => {
-    const ids = tasks.filter((t) => t.state === "Paused").map((t) => t.task_id);
+    const ids = tasks
+      .filter((task) => selectedTaskIds.size === 0 || selectedTaskIds.has(task.task_id))
+      .filter((task) => task.state === "Paused")
+      .map((task) => task.task_id);
     if (ids.length) {
       try {
         await invoke("resume_download_tasks", { taskIds: ids });
@@ -189,7 +219,10 @@ export function DownloadsView() {
     }
   };
   const handlePauseAll = async () => {
-    const ids = tasks.filter((t) => t.state === "Downloading" || t.state === "Pending").map((t) => t.task_id);
+    const ids = tasks
+      .filter((task) => selectedTaskIds.size === 0 || selectedTaskIds.has(task.task_id))
+      .filter((task) => task.state === "Downloading" || task.state === "Pending")
+      .map((task) => task.task_id);
     if (ids.length) {
       try {
         await invoke("pause_download_tasks", { taskIds: ids });
@@ -201,14 +234,37 @@ export function DownloadsView() {
   };
   const handleDeleteAll = async () => {
     const ids = tasks.map((t) => t.task_id);
-    if (ids.length) {
-      try {
-        await invoke("delete_download_tasks", { taskIds: ids });
-        fetchTasks();
-      } catch (e) {
-        console.error("全部删除失败:", e);
-      }
-    }
+    requestDelete(ids);
+  };
+  const handleDeleteSelected = () => requestDelete([...selectedTaskIds]);
+  const toggleTask = (taskId: string) =>
+    setSelectedTaskIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  const pageTaskIds = pagedTasks.map((task) => task.task_id);
+  const allPageSelected = pageTaskIds.length > 0 && pageTaskIds.every((id) => selectedTaskIds.has(id));
+  const togglePageTasks = () =>
+    setSelectedTaskIds((selected) => {
+      const next = new Set(selected);
+      pageTaskIds.forEach((id) => {
+        if (allPageSelected) next.delete(id);
+        else next.add(id);
+      });
+      return next;
+    });
+  const handlePlayDownloaded = (task: DownloadTask) => {
+    if (task.state !== "Completed") return;
+    openPlayer({
+      kind: "video",
+      bvid: task.bvid,
+      cid: task.cid,
+      title: task.title,
+      cover: task.cover,
+      localTaskId: task.task_id,
+    });
   };
 
   return (
@@ -262,7 +318,7 @@ export function DownloadsView() {
         </div>
 
         {/* 右侧按钮组 */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
           {/* 新建下载 */}
           <motion.button
             onClick={() => setView("search")}
@@ -301,13 +357,19 @@ export function DownloadsView() {
 
           {/* 全部开始 */}
           <ActionButton onClick={handleStartAll} icon={<Play style={{ width: "15px", height: "15px" }} />}>
-            全部开始
+            {selectedTaskIds.size > 0 ? "开始选中" : "全部开始"}
           </ActionButton>
 
           {/* 全部暂停 */}
           <ActionButton onClick={handlePauseAll} icon={<Pause style={{ width: "15px", height: "15px" }} />}>
-            全部暂停
+            {selectedTaskIds.size > 0 ? "暂停选中" : "全部暂停"}
           </ActionButton>
+
+          {selectedTaskIds.size > 0 ? (
+            <ActionButton onClick={handleDeleteSelected} icon={<Trash2 style={{ width: "15px", height: "15px" }} />}>
+              删除选中 ({selectedTaskIds.size})
+            </ActionButton>
+          ) : null}
 
           {/* 全部删除 */}
           <motion.button
@@ -464,13 +526,20 @@ export function DownloadsView() {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "minmax(320px, 1fr) 200px 100px 90px 130px",
+                gridTemplateColumns: "38px minmax(290px, 1fr) 220px 100px 120px 126px",
                 alignItems: "center",
                 padding: "12px 20px",
                 borderBottom: "1px solid #f0f0f5",
                 backgroundColor: "#fafafe",
               }}
             >
+              <input
+                type="checkbox"
+                checked={allPageSelected}
+                onChange={togglePageTasks}
+                aria-label="选择当前页任务"
+                style={{ width: "16px", height: "16px", accentColor: "#6366f1" }}
+              />
               <span style={{ fontSize: "13px", fontWeight: 600, color: "#7a7a8c" }}>文件名</span>
               <span style={{ fontSize: "13px", fontWeight: 600, color: "#7a7a8c", textAlign: "center" }}>进度</span>
               <span style={{ fontSize: "13px", fontWeight: 600, color: "#7a7a8c", textAlign: "center" }}>速度</span>
@@ -488,9 +557,12 @@ export function DownloadsView() {
                     index={index}
                     onPause={handlePause}
                     onResume={handleResume}
-                    onDelete={handleDelete}
+                    onDelete={(id) => requestDelete([id])}
                     onRestart={handleRestart}
                     onOpenFolder={handleOpenFolder}
+                    onPlay={handlePlayDownloaded}
+                    selected={selectedTaskIds.has(task.task_id)}
+                    onToggleSelected={toggleTask}
                   />
                 ))}
               </AnimatePresence>
@@ -540,6 +612,13 @@ export function DownloadsView() {
           </div>
         )}
       </motion.div>
+      {pendingDeleteIds ? (
+        <DownloadDeleteDialog
+          count={pendingDeleteIds.length}
+          onConfirm={(deleteFiles) => void confirmDelete(deleteFiles)}
+          onCancel={() => setPendingDeleteIds(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -555,6 +634,9 @@ function DownloadRow({
   onDelete,
   onRestart,
   onOpenFolder,
+  onPlay,
+  selected,
+  onToggleSelected,
 }: {
   task: DownloadTask;
   index: number;
@@ -562,7 +644,10 @@ function DownloadRow({
   onResume: (id: string) => void;
   onDelete: (id: string) => void;
   onRestart: (id: string) => void;
-  onOpenFolder: () => void;
+  onOpenFolder: (id?: string) => void;
+  onPlay: (task: DownloadTask) => void;
+  selected: boolean;
+  onToggleSelected: (id: string) => void;
 }) {
   const stateConfig = getStateConfig(task.state);
   const progressColor = getProgressColor(task.state);
@@ -581,19 +666,30 @@ function DownloadRow({
       transition={{ delay: Math.min(index * 0.04, 0.25), duration: 0.25 }}
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(320px, 1fr) 200px 100px 90px 130px",
+        gridTemplateColumns: "38px minmax(290px, 1fr) 220px 100px 120px 126px",
         alignItems: "center",
         padding: "14px 20px",
         borderBottom: "1px solid #f5f5f8",
         transition: "background-color 0.12s ease",
+        backgroundColor: selected ? "#f5f3ff" : "transparent",
+        cursor: task.state === "Completed" ? "pointer" : "default",
       }}
+      onClick={() => onPlay(task)}
       onMouseEnter={(e) => {
         e.currentTarget.style.backgroundColor = "#fafafe";
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.backgroundColor = "transparent";
+        e.currentTarget.style.backgroundColor = selected ? "#f5f3ff" : "transparent";
       }}
     >
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={() => onToggleSelected(task.task_id)}
+        onClick={(event) => event.stopPropagation()}
+        aria-label={`选择 ${task.title}`}
+        style={{ width: "16px", height: "16px", accentColor: "#6366f1" }}
+      />
       {/* 文件名区域 */}
       <div style={{ display: "flex", alignItems: "center", gap: "12px", minWidth: 0 }}>
         {/* 缩略图 */}
@@ -677,10 +773,13 @@ function DownloadRow({
               backgroundColor: progressColor,
             }}
             initial={{ width: 0 }}
-            animate={{ width: `${task.progress}%` }}
+            animate={{ width: `${Math.max(0, Math.min(100, task.progress || 0))}%` }}
             transition={{ duration: 0.4, ease: "easeOut" }}
           />
         </div>
+        <span style={{ fontSize: "11px", color: "#6f6f82", fontWeight: 600 }}>
+          {getStageText(task.stage, task.state)}
+        </span>
         {task.remaining_time && (
           <span style={{ fontSize: "11px", color: "#a0a0ae", fontVariantNumeric: "tabular-nums" }}>
             剩余 {task.remaining_time}
@@ -704,20 +803,25 @@ function DownloadRow({
 
       {/* 状态 */}
       <div style={{ textAlign: "center" }}>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "4px 12px",
-            borderRadius: "6px",
-            fontSize: "12px",
-            fontWeight: 600,
-            ...stateConfig.style,
-          }}
-        >
-          {stateConfig.text}
-        </span>
+        <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: "4px" }}>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "4px 12px",
+              borderRadius: "6px",
+              fontSize: "12px",
+              fontWeight: 600,
+              ...stateConfig.style,
+            }}
+          >
+            {stateConfig.text}
+          </span>
+          <span style={{ fontSize: "11px", color: task.state === "Failed" ? "#dc2626" : "#8b8b9a", maxWidth: "112px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={task.state === "Failed" ? task.error : getStageText(task.stage, task.state)}>
+            {task.state === "Failed" ? task.error || "查看日志" : getStageText(task.stage, task.state)}
+          </span>
+        </div>
       </div>
 
       {/* 操作 */}
@@ -733,11 +837,6 @@ function DownloadRow({
             <Play style={{ width: "15px", height: "15px" }} />
           </IconButton>
         )}
-        {task.state === "Completed" && (
-          <IconButton onClick={onOpenFolder} title="打开文件夹">
-            <FolderOpen style={{ width: "15px", height: "15px" }} />
-          </IconButton>
-        )}
         {task.state === "Failed" && (
           <IconButton onClick={() => onRestart(task.task_id)} title="重试">
             <RotateCcw style={{ width: "15px", height: "15px" }} />
@@ -749,9 +848,8 @@ function DownloadRow({
           <Trash2 style={{ width: "15px", height: "15px" }} />
         </IconButton>
 
-        {/* 更多 */}
-        <IconButton onClick={onOpenFolder} title="更多">
-          <MoreVertical style={{ width: "15px", height: "15px" }} />
+        <IconButton onClick={() => onOpenFolder(task.task_id)} title="打开所在目录">
+          <FolderOpen style={{ width: "15px", height: "15px" }} />
         </IconButton>
       </div>
     </motion.div>
@@ -775,7 +873,10 @@ function ActionButton({
     <motion.button
       whileHover={{ scale: 1.04 }}
       whileTap={{ scale: 0.96 }}
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick?.();
+      }}
       onMouseEnter={(e) => {
         e.currentTarget.style.backgroundColor = "#f5f5ff";
         e.currentTarget.style.borderColor = "#d0d0ff";
@@ -819,7 +920,10 @@ function IconButton({
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick?.();
+      }}
       title={title}
       style={{
         display: "flex",
@@ -930,6 +1034,11 @@ function getStateConfig(state: TaskState) {
         text: "下载中",
         style: { backgroundColor: "#eef2ff", color: "#6366f1" },
       };
+    case "Merging":
+      return {
+        text: "合并中",
+        style: { backgroundColor: "#faf5ff", color: "#9333ea" },
+      };
     case "Paused":
       return {
         text: "已暂停",
@@ -956,8 +1065,46 @@ function getProgressColor(state: TaskState) {
       return "#ef4444";
     case "Paused":
       return "#d1d5db";
+    case "Merging":
+      return "#9333ea";
     default:
       return "#6366f1";
+  }
+}
+
+function getStageText(stage?: DownloadStage, state?: TaskState): string {
+  switch (stage) {
+    case "downloading_video":
+      return "正在下载视频分片";
+    case "downloading_audio":
+      return "正在下载音频分片";
+    case "merging":
+      return "正在合并";
+    case "completed":
+      return "下载完成";
+    case "failed":
+      return "下载失败";
+    case "paused":
+      return "已暂停";
+    case "pending":
+      return "等待下载";
+  }
+
+  switch (state) {
+    case "Downloading":
+      return "正在下载";
+    case "Merging":
+      return "正在合并";
+    case "Pending":
+      return "等待下载";
+    case "Paused":
+      return "已暂停";
+    case "Completed":
+      return "下载完成";
+    case "Failed":
+      return "下载失败";
+    default:
+      return "等待下载";
   }
 }
 

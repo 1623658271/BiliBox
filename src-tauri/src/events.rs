@@ -12,6 +12,19 @@ pub enum TaskState {
     Paused,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadStage {
+    #[default]
+    Pending,
+    DownloadingVideo,
+    DownloadingAudio,
+    Merging,
+    Completed,
+    Failed,
+    Paused,
+}
+
 /// 下载进度
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadProgress {
@@ -25,6 +38,7 @@ pub struct DownloadProgress {
     pub url: Option<String>,
     pub download_dir: String,
     pub state: TaskState,
+    pub stage: DownloadStage,
     pub downloaded_count: u64,
     pub total_count: u64,
     pub speed: String,
@@ -54,6 +68,8 @@ pub enum DownloadEvent {
     TaskStateUpdate {
         task_id: String,
         state: TaskState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     TaskSleeping {
         task_id: String,
