@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v1.0.1"
+        description: "Release tag, for example v1.0.2"
         required: true
-        default: "v1.0.1"
+        default: "v1.0.2"
         type: string
       release_name:
         description: "Optional release title"
@@ -233,10 +233,11 @@ jobs:
             if (!(Test-Path $path) -or (Get-Item $path).Length -lt 5MB) {
               throw "$tool is missing or is only a launcher shim."
             }
-            & $path -version | Select-Object -First 1
+            $versionOutput = & $path -version 2>&1
             if ($LASTEXITCODE -ne 0) {
               throw "$tool cannot run from the packaged directory."
             }
+            Write-Host ($versionOutput | Select-Object -First 1)
           }
 
       - name: Package Windows assets
@@ -367,8 +368,20 @@ jobs:
           mkdir -p "$dmg_root"
           cp -R "$app_dir" "$dmg_root/"
           ln -s /Applications "$dmg_root/Applications"
-          hdiutil create -volname "Bilibili Box" -srcfolder "$dmg_root" \
-            -ov -format UDZO "release-assets/${base}-installer.dmg"
+          dmg_path="release-assets/${base}-installer.dmg"
+          for attempt in 1 2 3; do
+            rm -f "$dmg_path"
+            if hdiutil create -volname "Bilibili Box" -srcfolder "$dmg_root" \
+              -ov -format UDZO "$dmg_path"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Unable to create macOS DMG after ${attempt} attempts." >&2
+              exit 1
+            fi
+            echo "hdiutil reported a temporary failure; retrying (${attempt}/3)." >&2
+            sleep 5
+          done
 
       - name: Upload macOS assets
         uses: actions/upload-artifact@v4
