@@ -1,81 +1,121 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e
+set -euo pipefail
+
+PROJECT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$PROJECT_ROOT"
+
+OUTPUT_DIR="dist_linux"
+TAURI_RELEASE_DIR="src-tauri/target/release"
+ICON_SOURCE="icon.png"
+REFRESH_ICONS=false
+
+if [[ "${1:-}" == "--refresh-icons" ]]; then
+    REFRESH_ICONS=true
+    shift
+fi
+if [[ "$#" -gt 0 ]]; then
+    echo "ERROR: Usage: ./build-linux.sh [--refresh-icons]" >&2
+    exit 1
+fi
+
+fail() {
+    echo "ERROR: $1" >&2
+    exit 1
+}
+
+copy_runtime_tool() {
+    local tool_name="$1"
+    local tool_source=""
+    local candidate
+    for candidate in \
+        "$PROJECT_ROOT/env/$tool_name" \
+        "$PROJECT_ROOT/env/bin/$tool_name" \
+        "$PROJECT_ROOT/env/ffmpeg/bin/$tool_name"; do
+        if [[ -f "$candidate" ]]; then
+            tool_source="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$tool_source" ]]; then
+        tool_source="$(command -v "$tool_name" || true)"
+    fi
+    [[ -n "$tool_source" && -f "$tool_source" ]] ||
+        fail "$tool_name was not found. Put it in env/ or add it to PATH before building."
+    echo "  - Copying $tool_name from $tool_source"
+    install -m 755 "$tool_source" "$OUTPUT_DIR/env/$tool_name"
+
+    local tool_dir
+    local runtime_libraries=()
+    tool_dir="$(dirname "$tool_source")"
+    shopt -s nullglob
+    runtime_libraries=("$tool_dir"/*.so "$tool_dir"/*.so.*)
+    shopt -u nullglob
+    if ((${#runtime_libraries[@]})); then
+        cp -p "${runtime_libraries[@]}" "$OUTPUT_DIR/env/"
+    fi
+}
 
 echo "============================================"
 echo "  BiliBox Linux Build Script"
 echo "============================================"
-echo ""
+echo
+echo "Target architecture: $(uname -m)"
 
-# Set project root directory
-PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$PROJECT_ROOT"
+echo
+echo "[1/5] Installing locked dependencies..."
+[[ -f "package-lock.json" ]] || fail "package-lock.json was not found."
+[[ -f "frontend/package-lock.json" ]] || fail "frontend/package-lock.json was not found."
+npm ci --no-audit --no-fund
+npm --prefix frontend ci --no-audit --no-fund
 
-# Keep a single Tauri build output directory.
-TAURI_RELEASE_DIR="src-tauri/target/release"
-
-# Clean previous dist_linux output
-if [ -d "dist_linux" ]; then
-    echo "Cleaning previous dist_linux directory..."
-    rm -rf dist_linux
+echo
+if $REFRESH_ICONS; then
+    echo "[2/5] Regenerating application icons from $ICON_SOURCE..."
+    [[ -f "$ICON_SOURCE" ]] || fail "$ICON_SOURCE was not found."
+    npm run tauri -- icon "$ICON_SOURCE"
+    rm -rf "src-tauri/icons/ios" "src-tauri/icons/android"
+else
+    echo "[2/5] Using committed application icons."
+    [[ -f "src-tauri/icons/icon.png" ]] ||
+        fail "Linux icon was not found. Run ./build-linux.sh --refresh-icons."
 fi
 
-# Create output directory structure
-mkdir -p dist_linux
-mkdir -p dist_linux/env
-mkdir -p dist_linux/data/user
-mkdir -p dist_linux/data/download
-
-echo ""
-echo "[1/4] Installing dependencies..."
-npm install
-npm --prefix frontend install
-
-echo ""
-echo "[2/4] Building frontend..."
+echo
+echo "[3/5] Building frontend..."
 npm run build
 
-echo ""
-echo "[3/4] Building Tauri application..."
-npm run tauri build
+echo
+echo "[4/5] Building Tauri application..."
+npm run tauri -- build
 
-echo ""
-echo "[4/4] Copying build artifacts to dist_linux..."
+echo
+echo "[5/5] Preparing portable package in $OUTPUT_DIR..."
+rm -rf "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR/env" "$OUTPUT_DIR/data/user" "$OUTPUT_DIR/data/download"
 
-# Copy standalone executable
-if [ -f "$TAURI_RELEASE_DIR/bilibili-box" ]; then
-    echo "  - Copying bilibili-box executable..."
-    cp "$TAURI_RELEASE_DIR/bilibili-box" dist_linux/
-    chmod +x dist_linux/bilibili-box
+[[ -f "$TAURI_RELEASE_DIR/bilibili-box" ]] ||
+    fail "Tauri executable not found in $TAURI_RELEASE_DIR."
+install -m 755 "$TAURI_RELEASE_DIR/bilibili-box" "$OUTPUT_DIR/bilibili-box"
+
+shopt -s nullglob
+tauri_libraries=("$TAURI_RELEASE_DIR"/*.so "$TAURI_RELEASE_DIR"/*.so.* "$TAURI_RELEASE_DIR"/libwebkit*)
+shopt -u nullglob
+if ((${#tauri_libraries[@]})); then
+    cp -p "${tauri_libraries[@]}" "$OUTPUT_DIR/env/"
 fi
 
-# Copy shared libraries if they exist
-if ls "$TAURI_RELEASE_DIR"/*.so 1> /dev/null 2>&1; then
-    echo "  - Copying shared libraries..."
-    cp "$TAURI_RELEASE_DIR"/*.so dist_linux/env/ 2>/dev/null || true
+if [[ -d "$PROJECT_ROOT/env" ]]; then
+    cp -R "$PROJECT_ROOT/env/." "$OUTPUT_DIR/env/"
 fi
+copy_runtime_tool "ffmpeg"
+copy_runtime_tool "ffprobe"
 
-# Copy WebKit/GTK runtime files if they exist
-if ls "$TAURI_RELEASE_DIR"/libwebkit* 1> /dev/null 2>&1; then
-    echo "  - Copying WebKit runtime files..."
-    cp "$TAURI_RELEASE_DIR"/libwebkit* dist_linux/env/ 2>/dev/null || true
-fi
-
-echo ""
+echo
 echo "============================================"
-echo "  Build completed successfully!"
-echo "  Output directory: dist_linux"
+echo "  Build completed successfully."
+echo "  Output directory: $OUTPUT_DIR"
 echo "============================================"
-echo ""
-echo "Directory structure:"
-echo "  dist_linux/"
-echo "  +-- bilibili-box          (executable)"
-echo "  +-- env/                  (runtime dependencies)"
-echo "  +-- data/"
-echo "      +-- user/             (user data)"
-echo "      +-- download/         (default download directory)"
-echo ""
-
-# List output files
+echo
 echo "Generated files:"
-ls -la dist_linux/
+ls -la "$OUTPUT_DIR"

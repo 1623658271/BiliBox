@@ -1,184 +1,159 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableExtensions EnableDelayedExpansion
+
+set "PROJECT_ROOT=%~dp0"
+cd /d "%PROJECT_ROOT%"
+
+set "OUTPUT_DIR=dist_windows"
+set "TAURI_RELEASE_DIR=src-tauri\target\release"
+set "ICON_SOURCE=icon.png"
+set "REFRESH_ICONS=0"
+
+if /I "%~1"=="--refresh-icons" (
+    set "REFRESH_ICONS=1"
+    shift
+)
+if not "%~1"=="" (
+    echo ERROR: Usage: build-windows.bat [--refresh-icons]
+    exit /b 1
+)
 
 echo ============================================
 echo   BiliBox Windows Build Script
 echo ============================================
 echo.
 
-:: Set project root directory
-set "PROJECT_ROOT=%~dp0"
-cd /d "%PROJECT_ROOT%"
+echo [1/5] Installing locked dependencies...
+if not exist "package-lock.json" (
+    echo ERROR: package-lock.json was not found.
+    exit /b 1
+)
+if not exist "frontend\package-lock.json" (
+    echo ERROR: frontend\package-lock.json was not found.
+    exit /b 1
+)
+call npm ci --no-audit --no-fund
+if errorlevel 1 (
+    echo ERROR: Root dependency installation failed.
+    exit /b 1
+)
+call npm --prefix frontend ci --no-audit --no-fund
+if errorlevel 1 (
+    echo ERROR: Frontend dependency installation failed.
+    exit /b 1
+)
 
-:: Keep a single Tauri build output directory.
-set "TAURI_RELEASE_DIR=src-tauri\target\release"
-
-:: Clean previous dist_windows output
-if exist "dist_windows" (
-    echo Cleaning previous dist_windows directory...
-    rmdir /s /q "dist_windows"
-    if exist "dist_windows" (
-        echo ERROR: Failed to clean dist_windows. Close bilibili-box.exe or any Explorer window using this folder, then rebuild.
+echo.
+if "%REFRESH_ICONS%"=="1" (
+    echo [2/5] Regenerating application icons from %ICON_SOURCE%...
+    if not exist "%ICON_SOURCE%" (
+        echo ERROR: %ICON_SOURCE% was not found.
         exit /b 1
     )
-)
-
-:: Create output directory structure
-mkdir dist_windows
-mkdir dist_windows\env
-mkdir dist_windows\data
-mkdir dist_windows\data\user
-mkdir dist_windows\data\download
-
-echo.
-echo [1/5] Installing dependencies...
-call npm install
-call npm --prefix frontend install
-if errorlevel 1 (
-    echo ERROR: Dependency installation failed!
-    exit /b 1
-)
-
-echo.
-echo.
-echo [2/5] Refreshing application icons...
-if not exist "icon.png" (
-    echo ERROR: icon.png not found!
-    exit /b 1
-)
-call npm run tauri -- icon icon.png
-if errorlevel 1 (
-    echo ERROR: Icon generation failed!
-    exit /b 1
-)
-if exist "icon.ico" (
-    copy "icon.ico" "src-tauri\icons\icon.ico" /y >nul
-)
-if exist "src-tauri\icons\ios" (
-    rmdir /s /q "src-tauri\icons\ios"
-)
-if exist "src-tauri\icons\android" (
-    rmdir /s /q "src-tauri\icons\android"
+    call npm run tauri -- icon "%ICON_SOURCE%"
+    if errorlevel 1 (
+        echo ERROR: Icon generation failed.
+        exit /b 1
+    )
+    if exist "src-tauri\icons\ios" rmdir /s /q "src-tauri\icons\ios"
+    if exist "src-tauri\icons\android" rmdir /s /q "src-tauri\icons\android"
+) else (
+    echo [2/5] Using committed application icons.
+    if not exist "src-tauri\icons\icon.ico" (
+        echo ERROR: Windows icon was not found. Run build-windows.bat --refresh-icons.
+        exit /b 1
+    )
 )
 
 echo.
 echo [3/5] Building frontend...
 call npm run build
 if errorlevel 1 (
-    echo ERROR: Frontend build failed!
+    echo ERROR: Frontend build failed.
     exit /b 1
 )
 
 echo.
 echo [4/5] Building Tauri application...
-call npm run tauri build
+call npm run tauri -- build
 if errorlevel 1 (
-    echo ERROR: Tauri build failed!
+    echo ERROR: Tauri build failed.
     exit /b 1
 )
 
 echo.
-echo [5/5] Copying build artifacts to dist_windows...
+echo [5/5] Preparing portable package in %OUTPUT_DIR%...
+if exist "%OUTPUT_DIR%" (
+    rmdir /s /q "%OUTPUT_DIR%"
+    if exist "%OUTPUT_DIR%" (
+        echo ERROR: Failed to clean %OUTPUT_DIR%. Close any application using it and rebuild.
+        exit /b 1
+    )
+)
+mkdir "%OUTPUT_DIR%\env" >nul
+mkdir "%OUTPUT_DIR%\data\user" >nul
+mkdir "%OUTPUT_DIR%\data\download" >nul
 
-:: Copy standalone executable
 if exist "%TAURI_RELEASE_DIR%\bilibili-box.exe" (
-    echo   - Copying bilibili-box.exe...
-    copy "%TAURI_RELEASE_DIR%\bilibili-box.exe" "dist_windows\" /y >nul
-    if errorlevel 1 (
-        echo ERROR: Failed to copy bilibili-box.exe. Close the running app and rebuild.
-        exit /b 1
-    )
+    copy "%TAURI_RELEASE_DIR%\bilibili-box.exe" "%OUTPUT_DIR%\" /y >nul
 ) else if exist "%TAURI_RELEASE_DIR%\BiliBox.exe" (
-    echo   - Copying BiliBox.exe...
-    copy "%TAURI_RELEASE_DIR%\BiliBox.exe" "dist_windows\" /y >nul
-    if errorlevel 1 (
-        echo ERROR: Failed to copy BiliBox.exe. Close the running app and rebuild.
-        exit /b 1
-    )
+    copy "%TAURI_RELEASE_DIR%\BiliBox.exe" "%OUTPUT_DIR%\" /y >nul
 ) else (
-    echo ERROR: Tauri executable not found in %TAURI_RELEASE_DIR%!
+    echo ERROR: Tauri executable not found in %TAURI_RELEASE_DIR%.
+    exit /b 1
+)
+if errorlevel 1 (
+    echo ERROR: Failed to copy the application executable.
     exit /b 1
 )
 
-:: Copy required DLL files
 if exist "%TAURI_RELEASE_DIR%\*.dll" (
-    echo   - Copying DLL files...
-    xcopy "%TAURI_RELEASE_DIR%\*.dll" "dist_windows\env\" /y /q
+    copy "%TAURI_RELEASE_DIR%\*.dll" "%OUTPUT_DIR%\env\" /y >nul
 )
 
-:: Copy WebKit/GTK runtime files if they exist
-if exist "%TAURI_RELEASE_DIR%\webkit2gtk*" (
-    echo   - Copying WebKit runtime files...
-    xcopy "%TAURI_RELEASE_DIR%\webkit2gtk*" "dist_windows\env\" /y /q 2>nul
-)
-
-:: Copy external runtime tools required by download/merge.
-:: Preferred source order:
-::   1. project env folder
-::   2. project env\bin folder
-::   3. project env\ffmpeg\bin folder
-::   4. system PATH on the build machine
-echo   - Preparing FFmpeg runtime files...
 set "PROJECT_ENV=%PROJECT_ROOT%env"
 if exist "%PROJECT_ENV%\" (
-    xcopy "%PROJECT_ENV%\*" "dist_windows\env\" /e /i /y /q >nul
+    xcopy "%PROJECT_ENV%\*" "%OUTPUT_DIR%\env\" /e /i /y /q >nul
 )
 
-set "FFMPEG_SOURCE="
-if exist "%PROJECT_ENV%\ffmpeg.exe" set "FFMPEG_SOURCE=%PROJECT_ENV%\ffmpeg.exe"
-if not defined FFMPEG_SOURCE if exist "%PROJECT_ENV%\bin\ffmpeg.exe" set "FFMPEG_SOURCE=%PROJECT_ENV%\bin\ffmpeg.exe"
-if not defined FFMPEG_SOURCE if exist "%PROJECT_ENV%\ffmpeg\bin\ffmpeg.exe" set "FFMPEG_SOURCE=%PROJECT_ENV%\ffmpeg\bin\ffmpeg.exe"
-if not defined FFMPEG_SOURCE (
-    for /f "delims=" %%F in ('where ffmpeg 2^>nul') do (
-        if not defined FFMPEG_SOURCE set "FFMPEG_SOURCE=%%F"
-    )
-)
-if not defined FFMPEG_SOURCE (
-    echo ERROR: ffmpeg.exe was not found. Put it in env\ or add FFmpeg to PATH before building.
-    exit /b 1
-)
-copy "%FFMPEG_SOURCE%" "dist_windows\env\ffmpeg.exe" /y >nul
-for %%D in ("%FFMPEG_SOURCE%") do set "FFMPEG_DIR=%%~dpD"
-if exist "!FFMPEG_DIR!*.dll" (
-    copy "!FFMPEG_DIR!*.dll" "dist_windows\env\" /y >nul
-)
-
-set "FFPROBE_SOURCE="
-if exist "%PROJECT_ENV%\ffprobe.exe" set "FFPROBE_SOURCE=%PROJECT_ENV%\ffprobe.exe"
-if not defined FFPROBE_SOURCE if exist "%PROJECT_ENV%\bin\ffprobe.exe" set "FFPROBE_SOURCE=%PROJECT_ENV%\bin\ffprobe.exe"
-if not defined FFPROBE_SOURCE if exist "%PROJECT_ENV%\ffmpeg\bin\ffprobe.exe" set "FFPROBE_SOURCE=%PROJECT_ENV%\ffmpeg\bin\ffprobe.exe"
-if not defined FFPROBE_SOURCE (
-    for /f "delims=" %%F in ('where ffprobe 2^>nul') do (
-        if not defined FFPROBE_SOURCE set "FFPROBE_SOURCE=%%F"
-    )
-)
-if not defined FFPROBE_SOURCE (
-    echo ERROR: ffprobe.exe was not found. Put it in env\ or add FFmpeg to PATH before building.
-    exit /b 1
-)
-copy "%FFPROBE_SOURCE%" "dist_windows\env\ffprobe.exe" /y >nul
-for %%D in ("%FFPROBE_SOURCE%") do set "FFPROBE_DIR=%%~dpD"
-if exist "!FFPROBE_DIR!*.dll" (
-    copy "!FFPROBE_DIR!*.dll" "dist_windows\env\" /y >nul
-)
+call :copy_runtime_tool ffmpeg.exe
+if errorlevel 1 exit /b 1
+call :copy_runtime_tool ffprobe.exe
+if errorlevel 1 exit /b 1
 
 echo.
 echo ============================================
-echo   Build completed successfully!
-echo   Output directory: dist_windows
+echo   Build completed successfully.
+echo   Output directory: %OUTPUT_DIR%
 echo ============================================
 echo.
-echo Directory structure:
-echo   dist_windows/
-echo   +-- bilibili-box.exe     (or BiliBox.exe)
-echo   +-- env/                 (runtime dependencies)
-echo   +-- data/
-echo       +-- user/            (user data)
-echo       +-- download/        (default download directory)
-echo.
-
-:: List output files
 echo Generated files:
-dir /b dist_windows
+dir /b "%OUTPUT_DIR%"
+exit /b 0
 
-endlocal
+:copy_runtime_tool
+set "TOOL_NAME=%~1"
+set "TOOL_SOURCE="
+if exist "%PROJECT_ENV%\%TOOL_NAME%" set "TOOL_SOURCE=%PROJECT_ENV%\%TOOL_NAME%"
+if not defined TOOL_SOURCE if exist "%PROJECT_ENV%\bin\%TOOL_NAME%" set "TOOL_SOURCE=%PROJECT_ENV%\bin\%TOOL_NAME%"
+if not defined TOOL_SOURCE if exist "%PROJECT_ENV%\ffmpeg\bin\%TOOL_NAME%" set "TOOL_SOURCE=%PROJECT_ENV%\ffmpeg\bin\%TOOL_NAME%"
+if not defined TOOL_SOURCE (
+    for /f "delims=" %%F in ('where %TOOL_NAME% 2^>nul') do (
+        if not defined TOOL_SOURCE set "TOOL_SOURCE=%%F"
+    )
+)
+if not defined TOOL_SOURCE (
+    echo ERROR: %TOOL_NAME% was not found. Put it in env\ or add it to PATH before building.
+    exit /b 1
+)
+echo   - Copying %TOOL_NAME% from !TOOL_SOURCE!
+copy "!TOOL_SOURCE!" "%OUTPUT_DIR%\env\%TOOL_NAME%" /y >nul
+if errorlevel 1 (
+    echo ERROR: Failed to copy %TOOL_NAME%.
+    exit /b 1
+)
+for %%D in ("!TOOL_SOURCE!") do set "TOOL_DIR=%%~dpD"
+if exist "!TOOL_DIR!*.dll" (
+    copy "!TOOL_DIR!*.dll" "%OUTPUT_DIR%\env\" /y >nul
+)
+exit /b 0
