@@ -93,6 +93,9 @@ echo
 echo "[5/5] Preparing portable package in $OUTPUT_DIR..."
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/env" "$OUTPUT_DIR/data/user" "$OUTPUT_DIR/data/download"
+if [[ -f "THIRD_PARTY_NOTICES.md" ]]; then
+    install -m 644 "THIRD_PARTY_NOTICES.md" "$OUTPUT_DIR/THIRD_PARTY_NOTICES.md"
+fi
 
 [[ -f "$TAURI_RELEASE_DIR/bilibili-box" ]] ||
     fail "Tauri executable not found in $TAURI_RELEASE_DIR."

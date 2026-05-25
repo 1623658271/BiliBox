@@ -37,7 +37,7 @@ BiliBox 不是一个只会粘贴链接的下载器，而是面向日常使用的
 - **桌面体验优先**：基于 Tauri 2 构建，体积更轻，启动更快，系统集成更自然。
 - **真实业务闭环**：搜索、推荐、收藏夹、历史、稍后再看、追番追剧、下载队列都接入实际业务逻辑。
 - **播放和下载联动**：从任意列表进入播放页，确认资源后可直接加入后台下载。
-- **适合分发给非开发用户**：Windows 分发脚本会把 FFmpeg/FFprobe 放入 `env/`，避免“我电脑能跑，朋友电脑报错”的环境差异。
+- **适合分发给非开发用户**：三端 Release 构建会下载并校验真正可独立运行的 FFmpeg/FFprobe，将其放入 `env/` 后封装进安装版与便携版。
 - **本地优先**：便携版将登录态、用户信息和下载数据写入程序同级 `data/`；安装版使用系统应用数据目录，数据均不会上传。
 
 ## 功能亮点
@@ -140,7 +140,7 @@ BiliBox 不是一个只会粘贴链接的下载器，而是面向日常使用的
 | Rust | 1.77.2 或更高 |
 | Node.js | 18 或更高，推荐 LTS |
 | npm | 随 Node.js 安装 |
-| FFmpeg/FFprobe | 下载、合并和部分媒体处理能力需要 |
+| FFmpeg/FFprobe | 本地开发构建时需要；GitHub Release 的安装版和便携版已内置独立工具 |
 
 Windows 需要安装 Microsoft Visual C++ Build Tools，或安装 Visual Studio 2022 并勾选 **Desktop development with C++**。
 
@@ -177,10 +177,11 @@ npm run tauri build
 ### Windows 一键分发
 
 ```powershell
+.\scripts\prepare-ffmpeg-runtime.ps1
 .\build-windows.bat
 ```
 
-构建脚本会生成 `dist_windows/`，并尝试从以下位置复制 FFmpeg/FFprobe：
+运行时准备脚本会下载并校验独立的 Windows x64 静态 `ffmpeg.exe` 与 `ffprobe.exe`；构建脚本随后生成包含这套运行时的 `dist_windows/`。构建脚本会从以下位置复制 FFmpeg/FFprobe：
 
 - `env/ffmpeg.exe`、`env/ffprobe.exe`
 - `env/bin/ffmpeg.exe`、`env/bin/ffprobe.exe`
@@ -189,23 +190,45 @@ npm run tauri build
 
 分发给其他电脑时，请发送整个 `dist_windows/` 目录，而不是只发送单个 exe。
 
+### Linux 与 macOS 分发
+
+```bash
+# Linux x64
+./scripts/prepare-ffmpeg-runtime.sh linux-x64
+./build-linux.sh
+
+# macOS Apple Silicon
+./scripts/prepare-ffmpeg-runtime.sh macos-arm64
+./build-macos.sh
+
+# macOS Intel
+./scripts/prepare-ffmpeg-runtime.sh macos-x64
+./build-macos.sh
+```
+
+Linux 与 macOS 使用的工具名称同样是 `ffmpeg` 和 `ffprobe`，只是没有 Windows 的 `.exe` 后缀。三端 Release 工作流会自动完成上述下载与校验，不需要手动向压缩包或安装程序中复制文件。
+
 ### GitHub Release 产物
 
-推送 `v*` 标签或在 Actions 中手动运行 `Build And Release` 工作流，会构建三端安装版和便携版，并发布到对应 GitHub Release。`v1.0.0` 的资产文件清单如下：
+推送 `v*` 标签或在 Actions 中手动运行 `Build And Release` 工作流，会构建三端安装版和便携版，并发布到对应 GitHub Release。`v1.0.1` 的资产文件清单如下：
 
 | 平台 | Release Asset |
 | --- | --- |
-| Linux x64 | `Bilibili_Box-v1.0.0-linux-x64-installer.deb` |
-| Linux x64 | `Bilibili_Box-v1.0.0-linux-x64-installer.rpm` |
-| Linux x64 | `Bilibili_Box-v1.0.0-linux-x64-portable.tar.gz` |
-| Windows x64 | `Bilibili_Box-v1.0.0-windows-x64-installer.exe` |
-| Windows x64 | `Bilibili_Box-v1.0.0-windows-x64-portable.zip` |
-| macOS arm64 | `Bilibili_Box-v1.0.0-macos-arm64-installer.dmg` |
-| macOS arm64 | `Bilibili_Box-v1.0.0-macos-arm64-portable.zip` |
-| macOS x64 | `Bilibili_Box-v1.0.0-macos-x64-installer.dmg` |
-| macOS x64 | `Bilibili_Box-v1.0.0-macos-x64-portable.zip` |
+| Linux x64 | `Bilibili_Box-v1.0.1-linux-x64-installer.deb` |
+| Linux x64 | `Bilibili_Box-v1.0.1-linux-x64-installer.rpm` |
+| Linux x64 | `Bilibili_Box-v1.0.1-linux-x64-portable.tar.gz` |
+| Windows x64 | `Bilibili_Box-v1.0.1-windows-x64-installer.exe` |
+| Windows x64 | `Bilibili_Box-v1.0.1-windows-x64-portable.zip` |
+| macOS arm64 | `Bilibili_Box-v1.0.1-macos-arm64-installer.dmg` |
+| macOS arm64 | `Bilibili_Box-v1.0.1-macos-arm64-portable.zip` |
+| macOS x64 | `Bilibili_Box-v1.0.1-macos-x64-installer.dmg` |
+| macOS x64 | `Bilibili_Box-v1.0.1-macos-x64-portable.zip` |
 
-安装包和便携包都会携带构建时准备的 FFmpeg/FFprobe 运行环境。便携包通过程序旁的 `data/` 保存数据；安装包使用系统应用数据目录。macOS 产物当前为未进行 Apple Developer ID 签名和公证的构建，首次打开时可能需要在系统安全设置中确认。
+安装包和便携包都会携带经过执行校验的 FFmpeg/FFprobe 运行环境：Windows 安装后位于程序目录 `env/`，Linux 安装后位于 `/opt/Bilibili_Box/env/`，macOS 位于应用包 `Contents/MacOS/env/`。便携包通过程序旁的 `data/` 保存数据；安装包使用系统应用数据目录。macOS 产物当前为未进行 Apple Developer ID 签名和公证的构建，首次打开时可能需要在系统安全设置中确认。
+
+> `v1.0.0` 的 Windows 发布包误复制了 Chocolatey 的小型 shim 启动器，而非真实 FFmpeg 工具，已由 `v1.0.1` 替代，请勿继续分发旧版本。
+
+发布资产中包含独立的 GPL FFmpeg 工具及许可证文件，详细来源与许可说明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
 
 ## 本地数据与安全
 
@@ -253,6 +276,8 @@ bilibili-box/
       media_proxy.rs        内部媒体协议代理
   src-plugin/               插件相关 Rust 工程
   packaging/windows/        NSIS 安装包模板
+  scripts/                  三端发布运行时准备脚本
+  THIRD_PARTY_NOTICES.md    随包第三方工具许可说明
   build-windows.bat         Windows 分发构建脚本
   build-linux.sh            Linux 构建脚本
   build-macos.sh            macOS 构建脚本
@@ -282,7 +307,7 @@ cargo fmt
 - [x] 后台下载队列、可操作底部下载面板与下载任务状态追踪。
 - [x] 已下载视频的本地播放与任务文件管理。
 - [x] 浏览页面缓存、历史番剧播放修复与设置恢复默认。
-- [x] Windows 分发脚本补齐 FFmpeg/FFprobe 环境。
+- [x] 三端安装版与便携版随包分发经校验的 FFmpeg/FFprobe 运行环境。
 - [ ] 更细粒度的下载任务恢复与失败重试。
 - [ ] 插件系统示例与开发文档。
 

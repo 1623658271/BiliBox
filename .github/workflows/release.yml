@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag, for example v1.0.0"
+        description: "Release tag, for example v1.0.1"
         required: true
-        default: "v1.0.0"
+        default: "v1.0.1"
         type: string
       release_name:
         description: "Optional release title"
@@ -62,7 +62,6 @@ jobs:
             build-essential \
             curl \
             file \
-            ffmpeg \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
@@ -72,8 +71,18 @@ jobs:
             rpm \
             wget
 
+      - name: Prepare standalone FFmpeg runtime
+        run: chmod +x scripts/prepare-ffmpeg-runtime.sh && ./scripts/prepare-ffmpeg-runtime.sh linux-x64
+
       - name: Build portable application directory
         run: chmod +x build-linux.sh && ./build-linux.sh
+
+      - name: Verify bundled Linux runtime
+        run: |
+          test -x dist_linux/env/ffmpeg
+          test -x dist_linux/env/ffprobe
+          dist_linux/env/ffmpeg -version | head -n 1
+          dist_linux/env/ffprobe -version | head -n 1
 
       - name: Package Linux assets
         shell: bash
@@ -116,7 +125,7 @@ jobs:
           Architecture: amd64
           Maintainer: Bilibili Box
           Installed-Size: ${installed_size}
-          Depends: libgtk-3-0, libwebkit2gtk-4.1-0, ffmpeg
+          Depends: libgtk-3-0, libwebkit2gtk-4.1-0
           Description: Bilibili desktop media workstation
           DEB
           dpkg-deb --root-owner-group --build \
@@ -141,7 +150,6 @@ jobs:
           Source0: %{name}-%{version}.tar.gz
           Requires: gtk3
           Requires: webkit2gtk4.1
-          Requires: ffmpeg
 
           %description
           Bilibili desktop media workstation.
@@ -196,20 +204,18 @@ jobs:
       - name: Install packaging dependencies
         shell: pwsh
         run: |
-          choco install ffmpeg nsis -y --no-progress
-          $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") +
-            ";" + [Environment]::GetEnvironmentVariable("Path", "User")
-          Get-Command ffmpeg
-          Get-Command ffprobe
+          choco install nsis -y --no-progress
           if (!(Test-Path "C:\Program Files (x86)\NSIS\makensis.exe")) {
             throw "NSIS was not installed to the expected location."
           }
 
+      - name: Prepare standalone FFmpeg runtime
+        shell: pwsh
+        run: .\scripts\prepare-ffmpeg-runtime.ps1
+
       - name: Build portable application directory
         shell: pwsh
         run: |
-          $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") +
-            ";" + [Environment]::GetEnvironmentVariable("Path", "User")
           cmd /c build-windows.bat
           if (Test-Path "dist_windows\bilibili-box.exe") {
             Move-Item "dist_windows\bilibili-box.exe" "dist_windows\Bilibili_Box.exe"
@@ -217,6 +223,20 @@ jobs:
             Move-Item "dist_windows\BiliBox.exe" "dist_windows\Bilibili_Box.exe"
           } elseif (!(Test-Path "dist_windows\Bilibili_Box.exe")) {
             throw "Built executable was not found in dist_windows."
+          }
+
+      - name: Verify bundled Windows runtime
+        shell: pwsh
+        run: |
+          foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
+            $path = Join-Path "dist_windows\env" $tool
+            if (!(Test-Path $path) -or (Get-Item $path).Length -lt 5MB) {
+              throw "$tool is missing or is only a launcher shim."
+            }
+            & $path -version | Select-Object -First 1
+            if ($LASTEXITCODE -ne 0) {
+              throw "$tool cannot run from the packaged directory."
+            }
           }
 
       - name: Package Windows assets
@@ -282,11 +302,18 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install FFmpeg
-        run: brew install ffmpeg
+      - name: Prepare standalone FFmpeg runtime
+        run: chmod +x scripts/prepare-ffmpeg-runtime.sh && ./scripts/prepare-ffmpeg-runtime.sh macos-${{ matrix.arch }}
 
       - name: Build portable application directory
         run: chmod +x build-macos.sh && ./build-macos.sh
+
+      - name: Verify bundled macOS runtime
+        run: |
+          test -x dist_macos/env/ffmpeg
+          test -x dist_macos/env/ffprobe
+          dist_macos/env/ffmpeg -version | head -n 1
+          dist_macos/env/ffprobe -version | head -n 1
 
       - name: Package macOS assets
         shell: bash
