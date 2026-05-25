@@ -371,7 +371,10 @@ export function PlayerView() {
       return;
     }
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality({
+        bvid: selectedEpisode.bvid,
+        cid: selectedEpisode.cid,
+      });
       if (!downloadQuality) return;
       const taskIds = await invoke<string[]>("create_download_task", {
         params: {
@@ -394,7 +397,9 @@ export function PlayerView() {
   const handleDownloadAll = async () => {
     if (!episodes.length) return;
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality(
+        episodes.map((episode) => ({ bvid: episode.bvid, cid: episode.cid }))
+      );
       if (!downloadQuality) return;
       let taskIds: string[];
       if (playerState?.kind === "video") {

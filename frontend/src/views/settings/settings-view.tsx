@@ -212,7 +212,7 @@ export function SettingsView() {
           icon={<MonitorPlay style={{ width: 21, height: 21, color: "#2563eb" }} />}
           iconBgColor="#eff6ff"
           title="下载画质策略"
-          description="可在每次下载时选择画质，或直接使用默认画质"
+          description="可每次选择或使用默认画质；目标视频最高画质低于所选画质时，将自动下载其最高可用画质"
           control={
             <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap", justifyContent: "flex-end" }}>
               <div style={{ display: "flex", alignItems: "center", padding: "3px", gap: "2px", backgroundColor: "#f3f3f8", borderRadius: "10px" }}>

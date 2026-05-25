@@ -205,7 +205,7 @@ export function HistoryView() {
 
   const handleDownload = async (bvid: string, cid: number, title: string) => {
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality({ bvid, cid });
       if (!downloadQuality) return;
       const taskIds = await invoke<string[]>("create_download_task", {
         params: { bvid, cid, title, cids: [cid], download_quality: downloadQuality },

@@ -176,7 +176,7 @@ export function FavoritesView() {
 
   const handleDownload = async (media: FavMedia) => {
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality({ bvid: media.bvid, cid: media.cid });
       if (!downloadQuality) return;
       const taskIds = await invoke<string[]>("create_download_task", {
         params: { bvid: media.bvid, cid: media.cid, title: media.title, cids: [media.cid], download_quality: downloadQuality },
@@ -233,7 +233,9 @@ export function FavoritesView() {
     }
 
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality(
+        selected.map((media) => ({ bvid: media.bvid, cid: media.cid }))
+      );
       if (!downloadQuality) return;
       const taskGroups = await Promise.all(
         selected.map((media) =>

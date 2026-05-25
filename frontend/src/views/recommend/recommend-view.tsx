@@ -268,7 +268,7 @@ export function RecommendView() {
 
   const handleDownload = async (video: RecommendVideo) => {
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality({ bvid: video.bvid, cid: video.cid });
       if (!downloadQuality) return;
       await invoke<string[]>("create_download_task", {
         params: { bvid: video.bvid, cid: video.cid, title: video.title, cids: [video.cid], download_quality: downloadQuality },

@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { invoke } from "@/lib/api";
-import { useDownloadQualityPrompt } from "@/components/download-quality-dialog";
+import { useDownloadQualityPrompt, type DownloadQualityTarget } from "@/components/download-quality-dialog";
 import { notifyDownloadQueued } from "@/lib/download-feedback";
 import { openExternalUrl } from "@/lib/open-external";
 import type {
@@ -143,7 +143,7 @@ export function SearchView() {
 
   const handleDownload = async (bvid: string, cid: number, title: string) => {
     try {
-      const downloadQuality = await requestDownloadQuality();
+      const downloadQuality = await requestDownloadQuality({ bvid, cid });
       if (!downloadQuality) return;
       await queueDownload(bvid, cid, title, downloadQuality);
     } catch (err) {
@@ -153,9 +153,9 @@ export function SearchView() {
 
   const handleSearchVideoDownload = async (video: AggregateSearchResult["videos"][number], selectedQuality?: string) => {
     try {
-      const downloadQuality = selectedQuality ?? await requestDownloadQuality();
-      if (!downloadQuality) return false;
       const detail = await invoke<VideoInfo>("get_normal_info", { bvid: video.bvid });
+      const downloadQuality = selectedQuality ?? await requestDownloadQuality({ bvid: detail.bvid, cid: detail.cid });
+      if (!downloadQuality) return false;
       await queueDownload(detail.bvid, detail.cid, detail.title || video.title, downloadQuality);
       return true;
     } catch (err) {
@@ -166,12 +166,14 @@ export function SearchView() {
 
   const handleSearchBangumiDownload = async (bangumi: { season_id: number; title: string }, selectedQuality?: string) => {
     try {
-      const downloadQuality = selectedQuality ?? await requestDownloadQuality();
-      if (!downloadQuality) return false;
       const detail = await invoke<BangumiInfo>("get_bangumi_info", { seasonId: bangumi.season_id });
       if (!detail.episodes.length) {
         throw new Error("没有找到可下载的剧集");
       }
+      const downloadQuality = selectedQuality ?? await requestDownloadQuality(
+        detail.episodes.map((episode) => ({ bvid: episode.bvid, cid: episode.cid }))
+      );
+      if (!downloadQuality) return false;
       const groups = await Promise.all(
         detail.episodes.map((episode) =>
           invoke<string[]>("create_download_task", {
@@ -191,6 +193,16 @@ export function SearchView() {
       setError(String(err));
       return false;
     }
+  };
+
+  const resolveSearchVideoDownloadTargets = async (video: AggregateSearchResult["videos"][number]) => {
+    const detail = await invoke<VideoInfo>("get_normal_info", { bvid: video.bvid });
+    return [{ bvid: detail.bvid, cid: detail.cid }];
+  };
+
+  const resolveSearchBangumiDownloadTargets = async (bangumi: { season_id: number }) => {
+    const detail = await invoke<BangumiInfo>("get_bangumi_info", { seasonId: bangumi.season_id });
+    return detail.episodes.map((episode) => ({ bvid: episode.bvid, cid: episode.cid }));
   };
 
   const handleOpenBrowser = (url: string) => {
@@ -438,7 +450,10 @@ export function SearchView() {
               onOpenBangumiPlayer={handleOpenBangumiPlayer}
               onDownloadVideo={handleSearchVideoDownload}
               onDownloadBangumi={handleSearchBangumiDownload}
+              onResolveVideoDownloadTargets={resolveSearchVideoDownloadTargets}
+              onResolveBangumiDownloadTargets={resolveSearchBangumiDownloadTargets}
               onRequestDownloadQuality={requestDownloadQuality}
+              onDownloadError={(err) => setError(String(err))}
               onOpenBrowser={handleOpenBrowser}
             />
           ) : null}
@@ -720,7 +735,10 @@ function AggregateResult({
   onOpenBangumiPlayer,
   onDownloadVideo,
   onDownloadBangumi,
+  onResolveVideoDownloadTargets,
+  onResolveBangumiDownloadTargets,
   onRequestDownloadQuality,
+  onDownloadError,
   onOpenBrowser,
 }: {
   result: Extract<SearchResponse, { type: "Aggregate" }>;
@@ -729,7 +747,10 @@ function AggregateResult({
   onOpenBangumiPlayer: (bangumi: { season_id: number; title: string; cover: string }) => void;
   onDownloadVideo: (video: AggregateSearchResult["videos"][number], quality?: string) => Promise<boolean>;
   onDownloadBangumi: (bangumi: { season_id: number; title: string }, quality?: string) => Promise<boolean>;
-  onRequestDownloadQuality: () => Promise<string | null>;
+  onResolveVideoDownloadTargets: (video: AggregateSearchResult["videos"][number]) => Promise<DownloadQualityTarget[]>;
+  onResolveBangumiDownloadTargets: (bangumi: { season_id: number; title: string }) => Promise<DownloadQualityTarget[]>;
+  onRequestDownloadQuality: (targets: DownloadQualityTarget[]) => Promise<string | null>;
+  onDownloadError: (error: unknown) => void;
   onOpenBrowser: (url: string) => void;
 }) {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -774,19 +795,33 @@ function AggregateResult({
     const operations = [
       ...result.videos
         .filter((video) => selectedKeys.has(`video:${video.bvid}`))
-        .map((video) => ({ key: `video:${video.bvid}`, run: (quality: string) => onDownloadVideo(video, quality) })),
+        .map((video) => ({
+          key: `video:${video.bvid}`,
+          targets: () => onResolveVideoDownloadTargets(video),
+          run: (quality: string) => onDownloadVideo(video, quality),
+        })),
       ...result.bangumi
         .filter((bangumi) => selectedKeys.has(`bangumi:${bangumi.season_id}`))
-        .map((bangumi) => ({ key: `bangumi:${bangumi.season_id}`, run: (quality: string) => onDownloadBangumi(bangumi, quality) })),
+        .map((bangumi) => ({
+          key: `bangumi:${bangumi.season_id}`,
+          targets: () => onResolveBangumiDownloadTargets(bangumi),
+          run: (quality: string) => onDownloadBangumi(bangumi, quality),
+        })),
     ];
     if (!operations.length) return;
 
-    const downloadQuality = await onRequestDownloadQuality();
-    if (!downloadQuality) return;
     setBatchDownloading(true);
-    const outcomes = await Promise.all(operations.map(async (operation) => ({ key: operation.key, ok: await operation.run(downloadQuality) })));
-    setBatchDownloading(false);
-    setSelectedKeys(new Set(outcomes.filter((outcome) => !outcome.ok).map((outcome) => outcome.key)));
+    try {
+      const targets = (await Promise.all(operations.map((operation) => operation.targets()))).flat();
+      const downloadQuality = await onRequestDownloadQuality(targets);
+      if (!downloadQuality) return;
+      const outcomes = await Promise.all(operations.map(async (operation) => ({ key: operation.key, ok: await operation.run(downloadQuality) })));
+      setSelectedKeys(new Set(outcomes.filter((outcome) => !outcome.ok).map((outcome) => outcome.key)));
+    } catch (err) {
+      onDownloadError(err);
+    } finally {
+      setBatchDownloading(false);
+    }
   };
 
   return (

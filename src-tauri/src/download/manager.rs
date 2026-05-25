@@ -1403,6 +1403,45 @@ impl DownloadManager {
 
     fn preferred_video_qualities(config: &Config) -> Vec<VideoQuality> {
         let preferred = match config.download_quality.trim().to_ascii_lowercase().as_str() {
+            "8k" => Some(vec![
+                VideoQuality::Video8K,
+                VideoQuality::VideoDolby,
+                VideoQuality::VideoHDR,
+                VideoQuality::Video4K,
+                VideoQuality::Video1080P60,
+                VideoQuality::Video1080PPlus,
+                VideoQuality::Video1080P,
+                VideoQuality::Video720P60,
+                VideoQuality::Video720P,
+                VideoQuality::Video480P,
+                VideoQuality::Video360P,
+                VideoQuality::Video240P,
+            ]),
+            "dolby_vision" => Some(vec![
+                VideoQuality::VideoDolby,
+                VideoQuality::VideoHDR,
+                VideoQuality::Video4K,
+                VideoQuality::Video1080P60,
+                VideoQuality::Video1080PPlus,
+                VideoQuality::Video1080P,
+                VideoQuality::Video720P60,
+                VideoQuality::Video720P,
+                VideoQuality::Video480P,
+                VideoQuality::Video360P,
+                VideoQuality::Video240P,
+            ]),
+            "hdr" => Some(vec![
+                VideoQuality::VideoHDR,
+                VideoQuality::Video4K,
+                VideoQuality::Video1080P60,
+                VideoQuality::Video1080PPlus,
+                VideoQuality::Video1080P,
+                VideoQuality::Video720P60,
+                VideoQuality::Video720P,
+                VideoQuality::Video480P,
+                VideoQuality::Video360P,
+                VideoQuality::Video240P,
+            ]),
             "4k" => Some(vec![
                 VideoQuality::Video4K,
                 VideoQuality::Video1080P60,
@@ -1414,9 +1453,27 @@ impl DownloadManager {
                 VideoQuality::Video360P,
                 VideoQuality::Video240P,
             ]),
+            "1080p60" => Some(vec![
+                VideoQuality::Video1080P60,
+                VideoQuality::Video1080PPlus,
+                VideoQuality::Video1080P,
+                VideoQuality::Video720P60,
+                VideoQuality::Video720P,
+                VideoQuality::Video480P,
+                VideoQuality::Video360P,
+                VideoQuality::Video240P,
+            ]),
             "1080p_plus" => Some(vec![
                 VideoQuality::Video1080PPlus,
-                VideoQuality::Video1080P60,
+                VideoQuality::Video1080P,
+                VideoQuality::Video720P60,
+                VideoQuality::Video720P,
+                VideoQuality::Video480P,
+                VideoQuality::Video360P,
+                VideoQuality::Video240P,
+            ]),
+            "ai_repair" => Some(vec![
+                VideoQuality::VideoAiRepair,
                 VideoQuality::Video1080P,
                 VideoQuality::Video720P60,
                 VideoQuality::Video720P,
@@ -1432,8 +1489,14 @@ impl DownloadManager {
                 VideoQuality::Video360P,
                 VideoQuality::Video240P,
             ]),
-            "720p" => Some(vec![
+            "720p60" => Some(vec![
                 VideoQuality::Video720P60,
+                VideoQuality::Video720P,
+                VideoQuality::Video480P,
+                VideoQuality::Video360P,
+                VideoQuality::Video240P,
+            ]),
+            "720p" => Some(vec![
                 VideoQuality::Video720P,
                 VideoQuality::Video480P,
                 VideoQuality::Video360P,
@@ -1445,6 +1508,7 @@ impl DownloadManager {
                 VideoQuality::Video240P,
             ]),
             "360p" => Some(vec![VideoQuality::Video360P, VideoQuality::Video240P]),
+            "240p" => Some(vec![VideoQuality::Video240P]),
             _ => None,
         };
 

@@ -171,8 +171,6 @@ export function BangumiView() {
   const handleDownload = useCallback(
     async (seasonId: number, title: string) => {
       try {
-        const downloadQuality = await requestDownloadQuality();
-        if (!downloadQuality) return;
         const bangumiInfo = await invoke<{
           season_id: number;
           title: string;
@@ -188,6 +186,11 @@ export function BangumiView() {
         if (!bangumiInfo.episodes.length) {
           throw new Error("没有找到可下载的剧集");
         }
+
+        const downloadQuality = await requestDownloadQuality(
+          bangumiInfo.episodes.map((episode) => ({ bvid: episode.bvid, cid: episode.cid }))
+        );
+        if (!downloadQuality) return;
 
         const taskGroups = await Promise.all(
           bangumiInfo.episodes.map((ep) =>
