@@ -1,0 +1,403 @@
+name: Build And Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, for example v1.0.0"
+        required: true
+        default: "v1.0.0"
+        type: string
+      release_name:
+        description: "Optional release title"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark release as prerelease"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create release as draft"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: Bilibili_Box
+  NODE_VERSION: "22"
+
+jobs:
+  linux:
+    name: Build Linux x64
+    runs-on: ubuntu-22.04
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            ffmpeg \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            rpm \
+            wget
+
+      - name: Build portable application directory
+        run: chmod +x build-linux.sh && ./build-linux.sh
+
+      - name: Package Linux assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          base="${APP_NAME}-${TAG_NAME}-linux-x64"
+          mkdir -p release-assets
+
+          tar -C dist_linux -czf "release-assets/${base}-portable.tar.gz" .
+
+          package_root="$(mktemp -d)"
+          mkdir -p \
+            "$package_root/DEBIAN" \
+            "$package_root/opt/${APP_NAME}" \
+            "$package_root/usr/bin" \
+            "$package_root/usr/share/applications"
+          cp -a dist_linux/. "$package_root/opt/${APP_NAME}/"
+          rm -rf "$package_root/opt/${APP_NAME}/data"
+          cat > "$package_root/usr/bin/bilibili-box" <<'SH'
+          #!/usr/bin/env sh
+          exec /opt/Bilibili_Box/bilibili-box "$@"
+          SH
+          chmod 755 "$package_root/usr/bin/bilibili-box"
+          cat > "$package_root/usr/share/applications/bilibili-box.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Bilibili Box
+          Comment=Bilibili desktop media workstation
+          Exec=/usr/bin/bilibili-box
+          Terminal=false
+          Categories=AudioVideo;Network;
+          DESKTOP
+          installed_size="$(du -sk "$package_root" | cut -f1)"
+          cat > "$package_root/DEBIAN/control" <<DEB
+          Package: bilibili-box
+          Version: ${version}
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Bilibili Box
+          Installed-Size: ${installed_size}
+          Depends: libgtk-3-0, libwebkit2gtk-4.1-0, ffmpeg
+          Description: Bilibili desktop media workstation
+          DEB
+          dpkg-deb --root-owner-group --build \
+            "$package_root" "release-assets/${base}-installer.deb"
+
+          rpm_topdir="$PWD/rpmbuild"
+          rpm_source="$(mktemp -d)"
+          mkdir -p "$rpm_topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p "$rpm_source/bilibili-box-${version}"
+          cp -a "$package_root/opt" "$package_root/usr" \
+            "$rpm_source/bilibili-box-${version}/"
+          tar -C "$rpm_source" -czf \
+            "$rpm_topdir/SOURCES/bilibili-box-${version}.tar.gz" \
+            "bilibili-box-${version}"
+          cat > "$rpm_topdir/SPECS/bilibili-box.spec" <<RPM
+          Name: bilibili-box
+          Version: ${version}
+          Release: 1%{?dist}
+          Summary: Bilibili desktop media workstation
+          License: MIT
+          BuildArch: x86_64
+          Source0: %{name}-%{version}.tar.gz
+          Requires: gtk3
+          Requires: webkit2gtk4.1
+          Requires: ffmpeg
+
+          %description
+          Bilibili desktop media workstation.
+
+          %prep
+          %setup -q
+
+          %build
+
+          %install
+          mkdir -p %{buildroot}
+          cp -a opt usr %{buildroot}/
+
+          %files
+          /opt/Bilibili_Box
+          /usr/bin/bilibili-box
+          /usr/share/applications/bilibili-box.desktop
+          RPM
+          rpmbuild --define "_topdir $rpm_topdir" -bb \
+            "$rpm_topdir/SPECS/bilibili-box.spec"
+          cp "$rpm_topdir/RPMS/x86_64/"*.rpm \
+            "release-assets/${base}-installer.rpm"
+
+      - name: Upload Linux assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install packaging dependencies
+        shell: pwsh
+        run: |
+          choco install ffmpeg nsis -y --no-progress
+          $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") +
+            ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+          Get-Command ffmpeg
+          Get-Command ffprobe
+          if (!(Test-Path "C:\Program Files (x86)\NSIS\makensis.exe")) {
+            throw "NSIS was not installed to the expected location."
+          }
+
+      - name: Build portable application directory
+        shell: pwsh
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") +
+            ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+          cmd /c build-windows.bat
+          if (Test-Path "dist_windows\bilibili-box.exe") {
+            Move-Item "dist_windows\bilibili-box.exe" "dist_windows\Bilibili_Box.exe"
+          } elseif (Test-Path "dist_windows\BiliBox.exe") {
+            Move-Item "dist_windows\BiliBox.exe" "dist_windows\Bilibili_Box.exe"
+          } elseif (!(Test-Path "dist_windows\Bilibili_Box.exe")) {
+            throw "Built executable was not found in dist_windows."
+          }
+
+      - name: Package Windows assets
+        shell: pwsh
+        run: |
+          $base = "${env:APP_NAME}-${env:TAG_NAME}-windows-x64"
+          $version = $env:TAG_NAME.TrimStart("v")
+          New-Item -ItemType Directory -Force "release-assets" | Out-Null
+          Compress-Archive -Path "dist_windows" `
+            -DestinationPath "release-assets\$base-portable.zip" -Force
+          Copy-Item "dist_windows" "dist_windows_installer" -Recurse
+          Remove-Item "dist_windows_installer\data" -Recurse -Force
+          $source = (Resolve-Path "dist_windows_installer").Path
+          $output = Join-Path (Resolve-Path "release-assets").Path "$base-installer.exe"
+          $icon = (Resolve-Path "src-tauri\icons\icon.ico").Path
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (!(Test-Path $makensis)) {
+            throw "makensis.exe was not found after installation."
+          }
+          & $makensis `
+            "/DAPP_VERSION=$version" `
+            "/DSOURCE_DIR=$source" `
+            "/DOUTPUT_FILE=$output" `
+            "/DICON_SOURCE=$icon" `
+            "packaging\windows\installer.nsi"
+          if (!(Test-Path $output)) {
+            throw "NSIS installer was not generated."
+          }
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  macos:
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Build portable application directory
+        run: chmod +x build-macos.sh && ./build-macos.sh
+
+      - name: Package macOS assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${APP_NAME}-${TAG_NAME}-macos-${{ matrix.arch }}"
+          version="${TAG_NAME#v}"
+          app_dir="$RUNNER_TEMP/${APP_NAME}.app"
+          dmg_root="$RUNNER_TEMP/dmg-root"
+          mkdir -p release-assets "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+          cp dist_macos/bilibili-box "$app_dir/Contents/MacOS/bilibili-box"
+          cp -R dist_macos/env "$app_dir/Contents/MacOS/env"
+          cp -R dist_macos/data "$app_dir/Contents/MacOS/data"
+          cp src-tauri/icons/icon.icns "$app_dir/Contents/Resources/icon.icns"
+          cat > "$app_dir/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>Bilibili Box</string>
+            <key>CFBundleExecutable</key>
+            <string>bilibili-box</string>
+            <key>CFBundleIconFile</key>
+            <string>icon.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.bilibili.box</string>
+            <key>CFBundleName</key>
+            <string>Bilibili Box</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${version}</string>
+            <key>CFBundleVersion</key>
+            <string>${version}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>10.13</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          chmod +x "$app_dir/Contents/MacOS/bilibili-box" \
+            "$app_dir/Contents/MacOS/env/ffmpeg" \
+            "$app_dir/Contents/MacOS/env/ffprobe"
+          codesign --force --deep --sign - "$app_dir"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "$app_dir" "release-assets/${base}-portable.zip"
+          rm -rf "$app_dir/Contents/MacOS/data"
+          codesign --force --deep --sign - "$app_dir"
+          mkdir -p "$dmg_root"
+          cp -R "$app_dir" "$dmg_root/"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create -volname "Bilibili Box" -srcfolder "$dmg_root" \
+            -ov -format UDZO "release-assets/${base}-installer.dmg"
+
+      - name: Upload macOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs:
+      - linux
+      - windows
+      - macos
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh release-assets
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag_name="${{ inputs.tag_name }}"
+            release_name="${{ inputs.release_name }}"
+            prerelease="${{ inputs.prerelease }}"
+            draft="${{ inputs.draft }}"
+          else
+            tag_name="${GITHUB_REF_NAME}"
+            release_name=""
+            prerelease="false"
+            draft="false"
+          fi
+          if [ -z "$release_name" ]; then
+            release_name="Bilibili_Box ${tag_name}"
+          fi
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          draft: ${{ steps.meta.outputs.draft == 'true' }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          files: release-assets/*
+          fail_on_unmatched_files: true

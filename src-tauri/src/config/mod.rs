@@ -154,9 +154,14 @@ impl Default for Config {
 
 impl Config {
     pub fn app_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
-        std::env::current_exe()
+        // Portable archives include data/ next to the executable; installed apps
+        // need a user-writable application data directory instead.
+        let portable_dir = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf))
+            .filter(|path| path.join("data").is_dir());
+
+        portable_dir
             .or_else(|| app.path().app_data_dir().ok())
             .ok_or_else(|| "无法获取应用根目录".to_string())
     }

@@ -38,7 +38,7 @@ BiliBox 不是一个只会粘贴链接的下载器，而是面向日常使用的
 - **真实业务闭环**：搜索、推荐、收藏夹、历史、稍后再看、追番追剧、下载队列都接入实际业务逻辑。
 - **播放和下载联动**：从任意列表进入播放页，确认资源后可直接加入后台下载。
 - **适合分发给非开发用户**：Windows 分发脚本会把 FFmpeg/FFprobe 放入 `env/`，避免“我电脑能跑，朋友电脑报错”的环境差异。
-- **本地优先**：登录态、用户信息和下载数据默认写入 exe 同级 `data/`，不上传、不内置到构建产物。
+- **本地优先**：便携版将登录态、用户信息和下载数据写入程序同级 `data/`；安装版使用系统应用数据目录，数据均不会上传。
 
 ## 功能亮点
 
@@ -83,7 +83,7 @@ BiliBox 不是一个只会粘贴链接的下载器，而是面向日常使用的
 - 主题、下载目录、默认清晰度、任务并发、分片并发。
 - 卡片尺寸、每页数量、启动最大化。
 - 支持一键恢复默认设置，并保留当前账号登录状态。
-- 默认下载目录使用 exe 同级相对路径，适合绿色分发。
+- 便携版默认下载目录使用程序同级相对路径，适合绿色分发；安装版自动使用可写的系统应用数据目录。
 
 ## 界面预览
 
@@ -189,9 +189,27 @@ npm run tauri build
 
 分发给其他电脑时，请发送整个 `dist_windows/` 目录，而不是只发送单个 exe。
 
+### GitHub Release 产物
+
+推送 `v*` 标签或在 Actions 中手动运行 `Build And Release` 工作流，会构建三端安装版和便携版，并发布到对应 GitHub Release。`v1.0.0` 的资产文件清单如下：
+
+| 平台 | Release Asset |
+| --- | --- |
+| Linux x64 | `Bilibili_Box-v1.0.0-linux-x64-installer.deb` |
+| Linux x64 | `Bilibili_Box-v1.0.0-linux-x64-installer.rpm` |
+| Linux x64 | `Bilibili_Box-v1.0.0-linux-x64-portable.tar.gz` |
+| Windows x64 | `Bilibili_Box-v1.0.0-windows-x64-installer.exe` |
+| Windows x64 | `Bilibili_Box-v1.0.0-windows-x64-portable.zip` |
+| macOS arm64 | `Bilibili_Box-v1.0.0-macos-arm64-installer.dmg` |
+| macOS arm64 | `Bilibili_Box-v1.0.0-macos-arm64-portable.zip` |
+| macOS x64 | `Bilibili_Box-v1.0.0-macos-x64-installer.dmg` |
+| macOS x64 | `Bilibili_Box-v1.0.0-macos-x64-portable.zip` |
+
+安装包和便携包都会携带构建时准备的 FFmpeg/FFprobe 运行环境。便携包通过程序旁的 `data/` 保存数据；安装包使用系统应用数据目录。macOS 产物当前为未进行 Apple Developer ID 签名和公证的构建，首次打开时可能需要在系统安全设置中确认。
+
 ## 本地数据与安全
 
-BiliBox 默认把运行期数据写入 exe 同级目录：
+BiliBox 便携版把运行期数据写入程序同级目录：
 
 ```text
 data/
@@ -209,12 +227,15 @@ data/
 
 这些文件属于本机运行数据，不会提交到 Git，也不应该打进公开仓库。
 
+安装版不在应用安装目录内创建 `data/`，而会在操作系统为应用提供的可写数据目录下保存同样的目录结构，避免 Linux 与 macOS 安装路径的权限问题。
+
 项目内部的检查清单、质量审查与实现对照笔记同样不纳入公开仓库；公开仓库仅保留构建、运行、用户文档以及对二次开发有意义的工程资产。
 
 ## 项目结构
 
 ```text
 bilibili-box/
+  .github/workflows/         GitHub Release 自动构建工作流
   frontend/                 React 前端
     src/
       components/           通用组件和布局
@@ -231,6 +252,7 @@ bilibili-box/
       commands.rs           Tauri commands
       media_proxy.rs        内部媒体协议代理
   src-plugin/               插件相关 Rust 工程
+  packaging/windows/        NSIS 安装包模板
   build-windows.bat         Windows 分发构建脚本
   build-linux.sh            Linux 构建脚本
   build-macos.sh            macOS 构建脚本
