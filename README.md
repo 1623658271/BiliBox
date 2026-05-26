@@ -16,7 +16,7 @@
     ·
     <a href="#快速开始">快速开始</a>
     ·
-    <a href="#构建分发">构建分发</a>
+    <a href="#常见问题">常见问题</a>
   </p>
 
   <p>
@@ -122,126 +122,45 @@ BiliBox 不是一个只会粘贴链接的下载器，而是面向日常使用的
 
 ## 快速开始
 
-### 环境要求
+### 方式一：下载发行版（推荐普通用户）
+
+前往 [Releases](https://github.com/1623658271/Bilibili_Box/releases/latest) 页面下载对应平台的安装包或便携版。
+
+| 平台 | 版本 |
+| --- | --- |
+| Windows | 安装版 `.exe` / 便携版 `.zip` |
+| macOS | Apple Silicon `.dmg` / Intel `.dmg` |
+| Linux | `.deb` / `.rpm` / 便携版 `.tar.gz` |
+
+> macOS 首次打开可能提示"无法验证开发者"，请在 **系统设置 → 隐私与安全性** 中点击"仍要打开"。
+
+### 方式二：源码运行（适合开发者）
+
+**环境要求：**
 
 | 依赖 | 建议版本 |
 | --- | --- |
 | Rust | 1.77.2 或更高 |
 | Node.js | 18 或更高，推荐 LTS |
 | npm | 随 Node.js 安装 |
-| FFmpeg/FFprobe | 本地开发构建时需要；GitHub Release 的安装版和便携版已内置独立工具 |
+| FFmpeg/FFprobe | 本地开发构建时需要 |
 
 Windows 需要安装 Microsoft Visual C++ Build Tools，或安装 Visual Studio 2022 并勾选 **Desktop development with C++**。
 
-### 安装依赖
-
-```powershell
-npm install
-npm --prefix frontend install
-```
-
-### 开发运行
-
-```powershell
-npm run tauri dev
-```
-
-### 调试日志
-
-```powershell
-$env:RUST_LOG="info,bilibili_box_lib=debug"
-$env:RUST_BACKTRACE="1"
-npm run tauri dev 2>&1 | Tee-Object -FilePath .\player-debug.log
-```
-
-## 构建分发
-
-### 普通构建
-
-```powershell
-npm run build
-npm run tauri build
-```
-
-### Windows 一键分发
-
-```powershell
-.\scripts\prepare-ffmpeg-runtime.ps1
-.\build-windows.bat
-```
-
-运行时准备脚本会下载并校验独立的 Windows x64 静态 `ffmpeg.exe` 与 `ffprobe.exe`；构建脚本随后生成包含这套运行时的 `dist_windows/`。构建脚本会从以下位置复制 FFmpeg/FFprobe：
-
-- `env/ffmpeg.exe`、`env/ffprobe.exe`
-- `env/bin/ffmpeg.exe`、`env/bin/ffprobe.exe`
-- `env/ffmpeg/bin/ffmpeg.exe`、`env/ffmpeg/bin/ffprobe.exe`
-- 系统 `PATH`
-
-分发给其他电脑时，请发送整个 `dist_windows/` 目录，而不是只发送单个 exe。
-
-### Linux 与 macOS 分发
+**步骤：**
 
 ```bash
-# Linux x64
-./scripts/prepare-ffmpeg-runtime.sh linux-x64
-./build-linux.sh
+# 克隆项目
+git clone https://github.com/1623658271/Bilibili_Box.git
+cd Bilibili_Box
 
-# macOS Apple Silicon
-./scripts/prepare-ffmpeg-runtime.sh macos-arm64
-./build-macos.sh
+# 安装依赖
+npm install
+npm --prefix frontend install
 
-# macOS Intel
-./scripts/prepare-ffmpeg-runtime.sh macos-x64
-./build-macos.sh
+# 开发模式运行
+npm run tauri dev
 ```
-
-Linux 与 macOS 使用的工具名称同样是 `ffmpeg` 和 `ffprobe`，只是没有 Windows 的 `.exe` 后缀。三端 Release 工作流会自动完成上述下载与校验，不需要手动向压缩包或安装程序中复制文件。
-
-### GitHub Release 产物
-
-推送 `v*` 标签或在 Actions 中手动运行 `Build And Release` 工作流，会构建三端安装版和便携版，并发布到对应 GitHub Release。`v1.0.2` 的资产文件清单如下：
-
-| 平台 | Release Asset |
-| --- | --- |
-| Linux x64 | `Bilibili_Box-v1.0.2-linux-x64-installer.deb` |
-| Linux x64 | `Bilibili_Box-v1.0.2-linux-x64-installer.rpm` |
-| Linux x64 | `Bilibili_Box-v1.0.2-linux-x64-portable.tar.gz` |
-| Windows x64 | `Bilibili_Box-v1.0.2-windows-x64-installer.exe` |
-| Windows x64 | `Bilibili_Box-v1.0.2-windows-x64-portable.zip` |
-| macOS arm64 | `Bilibili_Box-v1.0.2-macos-arm64-installer.dmg` |
-| macOS arm64 | `Bilibili_Box-v1.0.2-macos-arm64-portable.zip` |
-| macOS x64 | `Bilibili_Box-v1.0.2-macos-x64-installer.dmg` |
-| macOS x64 | `Bilibili_Box-v1.0.2-macos-x64-portable.zip` |
-
-安装包和便携包都会携带经过执行校验的 FFmpeg/FFprobe 运行环境：Windows 安装后位于程序目录 `env/`，Linux 安装后位于 `/opt/Bilibili_Box/env/`，macOS 位于应用包 `Contents/MacOS/env/`。便携包通过程序旁的 `data/` 保存数据；安装包使用系统应用数据目录。macOS 产物当前为未进行 Apple Developer ID 签名和公证的构建，首次打开时可能需要在系统安全设置中确认。
-
-> `v1.0.0` 的 Windows 发布包误复制了 Chocolatey 的小型 shim 启动器，而非真实 FFmpeg 工具；`v1.0.1` 在发布校验阶段终止且未生成完整 Release。请分发 `v1.0.2` 或更高版本。
-
-发布资产中包含独立的 GPL FFmpeg 工具及许可证文件，详细来源与许可说明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
-
-## 本地数据与安全
-
-BiliBox 便携版把运行期数据写入程序同级目录：
-
-```text
-data/
-  user/
-    config.json
-    user.json
-  cache/
-  download/
-```
-
-- `config.json` 保存本地配置和登录 Cookie。
-- `user.json` 保存本地账号展示信息。
-- `cache/` 按登录账号隔离保存浏览页面响应数据，页面刷新时会更新对应缓存。
-- `download/` 是默认下载目录。
-
-这些文件属于本机运行数据，不会提交到 Git，也不应该打进公开仓库。
-
-安装版不在应用安装目录内创建 `data/`，而会在操作系统为应用提供的可写数据目录下保存同样的目录结构，避免 Linux 与 macOS 安装路径的权限问题。
-
-项目内部的检查清单、质量审查与实现对照笔记同样不纳入公开仓库；公开仓库仅保留构建、运行、用户文档以及对二次开发有意义的工程资产。
 
 ## 项目结构
 
@@ -272,20 +191,34 @@ bilibili-box/
   build-macos.sh            macOS 构建脚本
 ```
 
-## 常用命令
+## 常见问题
 
-```powershell
-# 前端构建
-npm run build
+### Q: 下载的视频在哪里？
 
-# Rust 检查
-cd src-tauri
-cargo check
+默认在程序目录下的 `download/` 文件夹。你可以在 **设置 → 下载目录** 中修改。
 
-# Rust 格式化
-cd src-tauri
-cargo fmt
-```
+### Q: 为什么下载失败？
+
+可能原因：
+1. **未登录** - 部分视频需要登录才能下载
+2. **网络问题** - 检查网络连接或尝试切换代理设置
+3. **FFmpeg 缺失** - 确保使用的是官方发布的完整版本
+
+### Q: 支持哪些视频画质？
+
+支持 240P 到 8K 共 13 个级别，具体取决于视频源可用的最高画质。
+
+### Q: 便携版和安装版有什么区别？
+
+| 区别 | 便携版 | 安装版 |
+|------|--------|--------|
+| 数据位置 | 程序目录 `data/` | 系统应用数据目录 |
+| 卸载 | 直接删除文件夹 | 使用系统卸载程序 |
+| 适用场景 | U盘携带、多设备同步 | 长期使用 |
+
+### Q: 如何导入/导出下载列表？
+
+下载任务保存在 `data/download/` 下的 `.download_tasks/` 目录中，便携版可直接复制整个 `data/` 文件夹。
 
 ## 免责声明
 
